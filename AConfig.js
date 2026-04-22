@@ -16,8 +16,8 @@
 // ============================================================
 
 // ── INFRAESTRUCTURA ───────────────────────────────────────────
-const SPREADSHEET_ID  = '1XVnSxKuX1X1-hqatdwaMsS6v2mnER-z7g8eVFwP71_k';
-const DRIVE_FOLDER_ID = '1SyDqYwEMCYijwk_Ky8ZwOtdZnsbOd50z';
+const SPREADSHEET_ID  = '1XVnSxKuX1X1-...';
+const DRIVE_FOLDER_ID = '1SyDqYwEMCYijwk_...';
 
 // ── NOMBRES DE HOJAS ──────────────────────────────────────────
 // Alineado con el documento de schema del DBA.
