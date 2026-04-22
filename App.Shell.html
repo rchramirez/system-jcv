@@ -1,0 +1,600 @@
+<script>
+// ============================================================
+// JCV FRONTEND — App.Shell.html  v5.0
+//
+// Shell de la aplicación: layout estructural y flujo de auth.
+//
+// Responsabilidades:
+//   1. initApp()      — punto de entrada tras splash
+//   2. AuthFlow       — login, logout, Google Auth
+//   3. Shell.render() — dibuja sidebar + topbar + contenido
+//   4. Sidebar        — navegación colapsable con tooltips
+//   5. Topbar         — breadcrumb, búsqueda, perfil (SPM)
+//   6. ThemeManager   — dark/light mode persistente
+//   7. ProfileMenu    — menú de usuario (cambio de contraseña,
+//                       config, logout)
+//
+// Dependencias (cargadas antes en Index.html):
+//   App.Constants → CONFIG, IC, H
+//   App.State     → Store, Router, EventBus, SessionMgr, CacheMgr
+//   App.Bridge    → API, Toast, Modal
+// ============================================================
+
+// ── 1. THEME MANAGER ─────────────────────────────────────────
+const ThemeManager = (() => {
+  const KEY = 'jcv_theme';
+
+  function init() {
+    const saved = localStorage.getItem(KEY);
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const dark = saved ? saved === 'dark' : prefersDark;
+    _apply(dark);
+  }
+
+  function toggle() {
+    const isDark = document.body.classList.contains('dark');
+    _apply(!isDark);
+  }
+
+  function _apply(dark) {
+    document.body.classList.toggle('dark', dark);
+    localStorage.setItem(KEY, dark ? 'dark' : 'light');
+    Store.set('darkMode', dark);
+    EventBus.emit('theme:change', { dark });
+    // Actualizar ícono del toggle en el sidebar
+    const btn = document.getElementById('sb-theme-btn');
+    if (btn) btn.innerHTML = dark ? IC.sun : IC.moon;
+  }
+
+  return { init, toggle };
+})();
+
+// ── 2. AUTH FLOW ─────────────────────────────────────────────
+// Gestiona la transición splash → login → app.
+const AuthFlow = (() => {
+
+  /** Llamado desde AuthUI.html tras login exitoso */
+  function onLogin(token, user, persist) {
+    SessionMgr.save(token, user, persist);
+    _hideAuth();
+    Shell.render(user);
+    SessionMgr.startRefresh();
+    Router.goDefault(user);
+    EventBus.emit('auth:login', { user });
+  }
+
+  /** Logout: limpia sesión y vuelve a la pantalla de auth */
+  function onLogout() {
+    const token = APP.token;
+    if (token) {
+      API.logout(token).catch(() => {}); // silencioso
+    }
+    SessionMgr.clear();
+    CacheMgr.evict();
+    _showAuth();
+    EventBus.emit('auth:logout');
+  }
+
+  function _showAuth() {
+    const authEl = document.getElementById('auth-screen');
+    const appEl  = document.getElementById('app');
+    if (authEl) authEl.style.display = '';
+    if (appEl)  appEl.innerHTML = '';
+    // Volver al form de login
+    if (typeof showAuthView === 'function') showAuthView('login');
+  }
+
+  function _hideAuth() {
+    const authEl = document.getElementById('auth-screen');
+    if (authEl) authEl.style.display = 'none';
+  }
+
+  return { onLogin, onLogout };
+})();
+
+// ── 3. SHELL ─────────────────────────────────────────────────
+// Dibuja el layout principal: sidebar + topbar + área de contenido.
+const Shell = (() => {
+
+  function render(user) {
+    const app = document.getElementById('app');
+    if (!app) return;
+
+    app.innerHTML = `
+      ${_renderSidebar(user)}
+      <div class="main-wrap" id="main-wrap">
+        ${_renderTopbar(user)}
+        <main class="main-content" id="main-content">
+          ${_renderSections()}
+        </main>
+      </div>
+      <div id="modal-overlay" class="modal-overlay"></div>
+      <div id="toast-container" class="toast-container"></div>
+    `;
+
+    _bindSidebarEvents();
+    _bindTopbarEvents(user);
+    ThemeManager.init();
+
+    // Registrar handlers de módulos en el Router
+    // (se registran aquí porque el DOM ya existe)
+    _registerRoutes();
+
+    Store.set('ready', true);
+  }
+
+  // ── SIDEBAR ──────────────────────────────────────────────
+
+  function _renderSidebar(user) {
+    const role      = user.role || '';
+    const collapsed = Store.get('sidebarCollapsed');
+
+    const ALL_ITEMS = [
+      // Sección principal
+      { id:'dashboard',  label:'Dashboard',    icon:IC.dashboard,  roles:['admin','secretary','maestro'], section:'main' },
+      { id:'people',     label:'Personas',     icon:IC.people,     roles:['admin','secretary'],           section:'main' },
+      { id:'schools',    label:'Escuelas',     icon:IC.schools,    roles:['admin','secretary','maestro'], section:'main' },
+      { id:'ministries', label:'Ministerios',  icon:IC.ministries, roles:['admin','secretary'],           section:'main' },
+      { id:'cells',      label:'Células',      icon:IC.cells,      roles:['admin','secretary'],           section:'main' },
+      { id:'churches',   label:'Nexos',        icon:IC.churches,   roles:['admin'],                      section:'main' },
+      // Sección admin
+      { id:'users',      label:'Usuarios',     icon:IC.users,      roles:['admin'],                      section:'admin' },
+      { id:'audit',      label:'Auditoría',    icon:IC.audit,      roles:['admin'],                      section:'admin' },
+      { id:'config',     label:'Config.',      icon:IC.config,     roles:['admin','secretary','maestro'], section:'admin' },
+    ];
+
+    const visible = ALL_ITEMS.filter(i => i.roles.includes(role));
+    const main    = visible.filter(i => i.section === 'main');
+    const admin   = visible.filter(i => i.section === 'admin');
+
+    const navItem = item => `
+      <button class="sb-ni" data-section="${item.id}"
+        onclick="Router.go('${item.id}')"
+        title="${item.label}">
+        <span class="sb-ni-icon">${item.icon}</span>
+        <span class="sb-ni-label">${item.label}</span>
+      </button>`;
+
+    const sectionLabel = lbl => `<div class="sb-section-lbl"><span>${lbl}</span></div>`;
+
+    const navHtml = `
+      ${main.map(navItem).join('')}
+      ${admin.length ? sectionLabel('Sistema') + admin.map(navItem).join('') : ''}
+    `;
+
+    const initials = H.initials(user.name || '');
+    const roleLabel = { admin:'Admin', secretary:'Secretario/a', maestro:'Maestro/a' }[role] || role;
+
+    return `
+      <aside class="sidebar ${collapsed ? 'sb-col' : ''}" id="sidebar">
+
+        <!-- Logo -->
+        <div class="sb-header">
+          <div class="sb-logo" id="sb-logo">
+            <div class="sb-logo-mark">JCV</div>
+            <div class="sb-logo-text-wrap">
+              <span class="sb-logo-name">JCV Sistema</span>
+              <span class="sb-logo-sub">Jesus Camino de Vida</span>
+            </div>
+          </div>
+          <button class="sb-toggle" id="sb-toggle" title="${collapsed ? 'Expandir' : 'Colapsar'}">
+            ${IC.menu}
+          </button>
+        </div>
+
+        <!-- Nav -->
+        <nav class="sb-nav" id="sb-nav">${navHtml}</nav>
+
+        <!-- User + footer -->
+        <div class="sb-footer">
+          <!-- User chip -->
+          <div class="sb-user-chip" title="${H.escape(user.email || user.name || '')}">
+            <div class="sb-user-av">${user.photoUrl ? `<img src="${user.photoUrl}" alt="">` : initials}</div>
+            <div class="sb-user-info">
+              <span class="sb-user-name">${H.escape((user.name||'').split(' ')[0])}</span>
+              <span class="sb-user-role">${roleLabel}</span>
+            </div>
+          </div>
+          <!-- Actions -->
+          <div class="sb-footer-btns">
+            <button class="sb-fb-btn" title="${Store.get('darkMode') ? 'Modo claro' : 'Modo oscuro'}" onclick="ThemeManager.toggle()" id="sb-theme-btn">
+              ${Store.get('darkMode') ? IC.sun : IC.moon}
+            </button>
+            <button class="sb-fb-btn sb-fb-logout" title="Cerrar sesión" onclick="AuthFlow.onLogout()">
+              ${IC.logout}
+            </button>
+          </div>
+        </div>
+
+      </aside>
+    `;
+  }
+
+  function _bindSidebarEvents() {
+    const toggle  = document.getElementById('sb-toggle');
+    const sidebar = document.getElementById('sidebar');
+    if (!toggle || !sidebar) return;
+
+    toggle.addEventListener('click', () => {
+      const isCol = sidebar.classList.toggle('sb-col');
+      Store.set('sidebarCollapsed', isCol);
+      localStorage.setItem('jcv_sb_col', isCol ? '1' : '0');
+    });
+
+    // Restaurar estado colapsado
+    if (localStorage.getItem('jcv_sb_col') === '1') {
+      sidebar.classList.add('sb-col');
+      Store.set('sidebarCollapsed', true);
+    }
+
+    // Tooltips en sidebar colapsado
+    document.querySelectorAll('.sb-ni[title]').forEach(el => {
+      el.addEventListener('mouseenter', _showTooltip);
+      el.addEventListener('mouseleave', _hideTooltip);
+    });
+  }
+
+  // ── TOPBAR ───────────────────────────────────────────────
+
+  function _renderTopbar(user) {
+    const photoHtml = user.photoUrl
+      ? `<img src="${user.photoUrl}" class="tb-avatar-img" alt="${H.escape(user.name)}">`
+      : `<div class="tb-avatar-initials">${H.initials(user.name)}</div>`;
+
+    return `
+      <header class="topbar" id="topbar">
+        <!-- Breadcrumb / título de sección -->
+        <div class="tb-left">
+          <div class="tb-breadcrumb" id="tb-breadcrumb">
+            <span class="tb-title" id="tb-title">Dashboard</span>
+          </div>
+        </div>
+
+        <!-- Acciones derechas -->
+        <div class="tb-right">
+          <!-- Botón de refreshear datos -->
+          <button class="tb-icon-btn" id="tb-refresh-btn"
+            title="Actualizar datos" onclick="Shell.refreshCurrentSection()">
+            ${IC.refresh}
+          </button>
+
+          <!-- Perfil de usuario (SPM) -->
+          <div class="tb-profile" id="tb-profile">
+            <button class="tb-profile-btn" id="tb-profile-btn"
+              onclick="ProfileMenu.toggle()">
+              <div class="tb-avatar">${photoHtml}</div>
+              <div class="tb-profile-info">
+                <span class="tb-profile-name">${H.escape(user.name || 'Usuario')}</span>
+                <span class="tb-profile-role">${_roleLabel(user.role)}</span>
+              </div>
+              <span class="tb-profile-chevron">${IC.chevronDown}</span>
+            </button>
+
+            <!-- Profile dropdown menu -->
+            <div class="tb-profile-menu" id="tb-profile-menu">
+              <div class="pm-header">
+                <div class="tb-avatar pm-avatar">${photoHtml}</div>
+                <div>
+                  <div class="pm-name">${H.escape(user.name || '')}</div>
+                  <div class="pm-email">${H.escape(user.email || '')}</div>
+                </div>
+              </div>
+              <div class="pm-divider"></div>
+              <button class="pm-item" onclick="ProfileMenu.close(); Router.go('config')">
+                <span class="pm-item-icon">${IC.user}</span>
+                Mi perfil
+              </button>
+              <button class="pm-item" onclick="ProfileMenu.showChangePassword()">
+                <span class="pm-item-icon">${IC.key}</span>
+                Cambiar contraseña
+              </button>
+              <button class="pm-item" onclick="ProfileMenu.close(); ThemeManager.toggle()">
+                <span class="pm-item-icon">${IC.moon}</span>
+                <span id="pm-theme-label">${Store.get('darkMode') ? 'Modo claro' : 'Modo oscuro'}</span>
+              </button>
+              <div class="pm-divider"></div>
+              <button class="pm-item pm-item-danger" onclick="AuthFlow.onLogout()">
+                <span class="pm-item-icon">${IC.logout}</span>
+                Cerrar sesión
+              </button>
+            </div>
+          </div>
+        </div>
+      </header>
+    `;
+  }
+
+  function _bindTopbarEvents(user) {
+    // Cerrar profile menu al click fuera
+    document.addEventListener('click', e => {
+      const profile = document.getElementById('tb-profile');
+      if (profile && !profile.contains(e.target)) {
+        ProfileMenu.close();
+      }
+    });
+
+    // Actualizar label de tema cuando cambia
+    EventBus.on('theme:change', ({ dark }) => {
+      const lbl = document.getElementById('pm-theme-label');
+      if (lbl) lbl.textContent = dark ? 'Modo claro' : 'Modo oscuro';
+    });
+
+    // Actualizar título del topbar cuando cambia la sección
+    EventBus.on('nav:change', ({ section }) => {
+      const titleEl = document.getElementById('tb-title');
+      if (titleEl) {
+        const item = _buildNavItems(user.role).find(i => i.id === section);
+        titleEl.textContent = item ? item.label : '';
+      }
+    });
+  }
+
+  function _roleLabel(role) {
+    const labels = {
+      admin:     'Administrador',
+      secretary: 'Secretario/a',
+      maestro:   'Maestro/a',
+    };
+    return labels[role] || role || '';
+  }
+
+  // ── SECCIONES ────────────────────────────────────────────
+
+  function _renderSections() {
+    const sections = [
+      'dashboard', 'people', 'cells', 'churches',
+      'ministries', 'schools', 'users', 'audit', 'config',
+    ];
+    return sections.map(s =>
+      `<section id="sect-${s}" style="display:none"></section>`
+    ).join('');
+  }
+
+  // ── REGISTRO DE RUTAS ────────────────────────────────────
+  // IMPORTANTE: usa late binding — resuelve el módulo en el momento
+  // de navegar, no al registrar. Esto evita que _registerRoutes()
+  // capture referencias al stub antes de que los módulos reales carguen.
+  // Los módulos se declaran UNA SOLA VEZ en App.Modules.html / App.Schools.html.
+
+  function _registerRoutes() {
+    const _mod = name => params => {
+      const modules = {
+        dashboard:  typeof DashboardModule  !== 'undefined' ? DashboardModule  : null,
+        people:     typeof PeopleModule     !== 'undefined' ? PeopleModule     : null,
+        cells:      typeof CellsModule      !== 'undefined' ? CellsModule      : null,
+        churches:   typeof ChurchesModule   !== 'undefined' ? ChurchesModule   : null,
+        ministries: typeof MinistriesModule !== 'undefined' ? MinistriesModule : null,
+        schools:    typeof SchoolsModule    !== 'undefined' ? SchoolsModule    : null,
+        users:      typeof UsersModule      !== 'undefined' ? UsersModule      : null,
+        audit:      typeof AuditModule      !== 'undefined' ? AuditModule      : null,
+        config:     typeof ConfigModule     !== 'undefined' ? ConfigModule     : null,
+      };
+      const mod = modules[name];
+      if (mod && typeof mod.render === 'function') {
+        mod.render(params);
+      } else {
+        const el = document.getElementById('sect-' + name);
+        if (el) el.innerHTML = `<div style="padding:48px 24px;text-align:center;color:var(--text-muted);font-size:14px">Módulo "${name}" no disponible</div>`;
+      }
+    };
+
+    Router.register('dashboard',  _mod('dashboard'));
+    Router.register('people',     _mod('people'));
+    Router.register('cells',      _mod('cells'));
+    Router.register('churches',   _mod('churches'));
+    Router.register('ministries', _mod('ministries'));
+    Router.register('schools',    _mod('schools'));
+    Router.register('users',      _mod('users'));
+    Router.register('audit',      _mod('audit'));
+    Router.register('config',     _mod('config'));
+  }
+
+  // ── REFRESH ──────────────────────────────────────────────
+
+  function refreshCurrentSection() {
+    const section = Router.current();
+    if (!section) return;
+    // Evict caches relacionados con la sección actual
+    const cacheKeys = {
+      people:     ['people'],
+      cells:      ['cells'],
+      churches:   ['churches'],
+      ministries: ['ministries'],
+      users:      ['users'],
+      audit:      ['auditLog'],
+      schools:    ['schoolData_all', ...CONFIG.GRADE_KEYS.map(g => 'schoolData_' + g)],
+      dashboard:  ['dashboardStats'],
+    };
+    (cacheKeys[section] || []).forEach(k => CacheMgr.evict(k));
+    Router.go(section, Router.getParams());
+    Toast.info('Datos actualizados');
+  }
+
+  // ── TOOLTIPS ─────────────────────────────────────────────
+
+  const _tt = document.getElementById('sb-tt') || document.createElement('div');
+
+  function _showTooltip(e) {
+    const sidebar = document.getElementById('sidebar');
+    if (!sidebar || !sidebar.classList.contains('sb-col')) return;
+    const title = e.currentTarget.getAttribute('title');
+    if (!title) return;
+    const rect  = e.currentTarget.getBoundingClientRect();
+    _tt.className   = 'sb-tooltip sb-tooltip-show';
+    _tt.textContent = title;
+    _tt.style.top   = (rect.top + rect.height / 2) + 'px';
+    document.body.appendChild(_tt);
+  }
+
+  function _hideTooltip() {
+    _tt.className = 'sb-tooltip';
+    _tt.textContent = '';
+  }
+
+  return { render, refreshCurrentSection };
+})();
+
+// ── 4. PROFILE MENU (SPM) ────────────────────────────────────
+const ProfileMenu = (() => {
+  let _open = false;
+
+  function toggle() {
+    _open ? close() : open();
+  }
+
+  function open() {
+    const menu = document.getElementById('tb-profile-menu');
+    if (menu) menu.classList.add('pm-open');
+    _open = true;
+  }
+
+  function close() {
+    const menu = document.getElementById('tb-profile-menu');
+    if (menu) menu.classList.remove('pm-open');
+    _open = false;
+  }
+
+  function showChangePassword() {
+    close();
+    Modal.open({
+      title: 'Cambiar contraseña',
+      size:  'sm',
+      body: `
+        <div class="form-group">
+          <label class="form-label">Contraseña actual</label>
+          <div class="input-icon-wrap">
+            <input type="password" id="cp-current" class="form-input"
+              placeholder="Contraseña actual" autocomplete="current-password">
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Nueva contraseña</label>
+          <div class="input-icon-wrap">
+            <input type="password" id="cp-new" class="form-input"
+              placeholder="Mínimo 6 caracteres" autocomplete="new-password"
+              oninput="Shell._checkPassStrength(this.value)">
+          </div>
+          <div class="pass-strength-wrap">
+            <div class="pass-strength-bar"><div id="cp-strength-fill"></div></div>
+            <span id="cp-strength-label" class="pass-strength-label"></span>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Confirmar nueva contraseña</label>
+          <div class="input-icon-wrap">
+            <input type="password" id="cp-confirm" class="form-input"
+              placeholder="Repetir contraseña" autocomplete="new-password">
+          </div>
+        </div>
+        <div id="cp-msg"></div>
+      `,
+      footer: `
+        <button class="btn btn-ghost" onclick="Modal.close()">Cancelar</button>
+        <button class="btn btn-primary" onclick="Shell._submitChangePassword()">
+          Guardar cambios
+        </button>
+      `,
+    });
+  }
+
+  return { toggle, open, close, showChangePassword };
+})();
+
+// ── 5. SHELL HELPERS PÚBLICOS ────────────────────────────────
+// Funciones que el HTML inline necesita referenciar directamente.
+
+Shell._checkPassStrength = function(pass) {
+  const fill  = document.getElementById('cp-strength-fill');
+  const label = document.getElementById('cp-strength-label');
+  if (!fill || !label) return;
+  let strength = 0;
+  if (pass.length >= 6)  strength++;
+  if (pass.length >= 10) strength++;
+  if (/[A-Z]/.test(pass)) strength++;
+  if (/[0-9]/.test(pass)) strength++;
+  if (/[^A-Za-z0-9]/.test(pass)) strength++;
+  const levels = ['', 'Muy débil', 'Débil', 'Regular', 'Fuerte', 'Muy fuerte'];
+  const colors = ['', '#EF4444', '#F97316', '#EAB308', '#22C55E', '#16A34A'];
+  const widths = ['0%', '20%', '40%', '60%', '80%', '100%'];
+  fill.style.width      = widths[strength];
+  fill.style.background = colors[strength];
+  label.textContent     = levels[strength];
+  label.style.color     = colors[strength];
+};
+
+Shell._submitChangePassword = async function() {
+  const current  = (document.getElementById('cp-current')  || {}).value || '';
+  const newPass  = (document.getElementById('cp-new')       || {}).value || '';
+  const confirm  = (document.getElementById('cp-confirm')   || {}).value || '';
+  const msgEl    = document.getElementById('cp-msg');
+
+  const _setMsg = (text, type) => {
+    if (msgEl) msgEl.innerHTML = `<div class="form-msg form-msg-${type}">${H.escape(text)}</div>`;
+  };
+
+  if (!current)           return _setMsg('Ingresá la contraseña actual', 'error');
+  if (newPass.length < 6) return _setMsg('La nueva contraseña debe tener al menos 6 caracteres', 'error');
+  if (newPass !== confirm) return _setMsg('Las contraseñas no coinciden', 'error');
+
+  const btn = document.querySelector('#modal-overlay .btn-primary');
+  if (btn) { btn.disabled = true; btn.textContent = 'Guardando...'; }
+
+  try {
+    await API.changePassword(APP.user.id, current, newPass);
+    Modal.close();
+    Toast.success('Contraseña actualizada correctamente');
+  } catch (err) {
+    _setMsg(err.message || 'Error al cambiar la contraseña', 'error');
+    if (btn) { btn.disabled = false; btn.textContent = 'Guardar cambios'; }
+  }
+};
+
+// ── 6. INICIALIZACIÓN ────────────────────────────────────────
+// Punto de entrada principal — llamado desde AuthUI.html
+// cuando el splash termina.
+
+async function initApp() {
+  // FIX v5: Si AuthFlow.onLogin() ya fue llamado desde doLogin(),
+  // el Store ya tiene el user. No volver a verificar — ir directo.
+  const existingUser = Store.get('user');
+  if (existingUser && Store.get('token')) {
+    // Ya autenticado por doLogin() → renderizar directamente
+    Shell.render(existingUser);
+    SessionMgr.startRefresh();
+    Router.goDefault(existingUser);
+    return;
+  }
+
+  // Flujo de restauración de sesión desde storage (recarga de página)
+  const savedToken = SessionMgr.load();
+  if (!savedToken) {
+    document.getElementById('auth-screen').style.display = '';
+    return;
+  }
+
+  try {
+    // getCurrentUser del Controller devuelve { success, user } (sin envelope {ok,data}).
+    // GASBridge lo maneja correctamente por la rama 'success' in res.
+    const res = await API.getCurrentUser(savedToken);
+
+    // res puede ser { success, user } (de GASBridge rama success)
+    // o el data desenvuelto si el Controller lo wrappea con _respond
+    const inner = (res && res.success !== undefined) ? res
+                : (res && res.ok && res.data) ? res.data : null;
+
+    if (inner && inner.success && inner.user) {
+      AuthFlow.onLogin(savedToken, inner.user, !!localStorage.getItem('jcv_token'));
+    } else {
+      SessionMgr.clear();
+      document.getElementById('auth-screen').style.display = '';
+    }
+  } catch (_) {
+    SessionMgr.clear();
+    document.getElementById('auth-screen').style.display = '';
+  }
+}
+
+// ── NOTA: Los módulos (DashboardModule, PeopleModule, etc.) se declaran
+// en App.Modules.html y App.Schools.html — NO aquí.
+// _registerRoutes() usa late binding para resolverlos en tiempo de navegación.
+</script>

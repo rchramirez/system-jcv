@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JCV — Sistema de Gestión</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700;800;900&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+  <!-- 1. Design system base (tokens, sidebar, auth, dark mode) -->
+  <?!= include('Styles'); ?>
+
+  <!-- 2. Shell styles (topbar, modal, toast, badges, botones, forms) -->
+  <?!= include('App.Shell.styles'); ?>
+
+</head>
+<body>
+
+  <!-- Splash + Auth (se muestran antes que la app) -->
+  <?!= include('AuthUI'); ?>
+
+  <!-- Contenedor principal de la app (lo llena Shell.render()) -->
+  <div id="app"></div>
+
+  <!-- Tooltip del sidebar (siempre en el DOM) -->
+  <div class="sb-tooltip" id="sb-tt"></div>
+
+  <!-- ══ SCRIPTS — orden estricto de dependencias ══ -->
+
+  <!-- Parte 1: Constantes, iconos, helpers puros -->
+  <?!= include('App.Constants'); ?>
+
+  <!-- Parte 2: Estado global, Router, EventBus, SessionMgr, CacheMgr -->
+  <?!= include('App.State'); ?>
+
+  <!-- Parte 3: GAS Bridge, API, Toast, Modal -->
+  <?!= include('App.Bridge'); ?>
+
+  <!-- Parte 4: Shell (Sidebar, Topbar, AuthFlow, ThemeManager) -->
+  <?!= include('App.Shell'); ?>
+
+  <!-- Parte 5: Módulos de entidades -->
+  <?!= include('App.Modules'); ?>
+
+  <!-- Parte 6: Módulo de Escuelas (más complejo, carga último) -->
+  <?!= include('App.Schools'); ?>
+
+</body>
+</html>

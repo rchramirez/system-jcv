@@ -1,0 +1,1265 @@
+<script>
+// ============================================================
+// JCV — App.Schools.html  v5.3
+// Diseño fiel al original:
+//   • Grade bar (.schools-grade-bar + .grade-pill) igual al original
+//   • Sidebar nav (.schools-module-nav) con 6 módulos
+//   • Módulos: Alumnos · Clases · Cuestionarios · Calificaciones
+//              Bajas · Egresados
+//   • Buscador en cada tabla
+//   • Cuestionarios: cards por clase con btn "Asignar a todos"
+//                    y calificación inline por alumno
+//
+// FIXES v5.3:
+//   1. Bug inscripción: _selEnr usaba data-id correcto pero
+//      onclick string interpolation escapaba mal el id —
+//      ahora usa closure limpio con dataset
+//   2. Modal inscripción: btn enr-ok busca por id correcto
+//   3. Cuestionarios: botón "Asignar a todos" que crea
+//      cuestionario pendiente para cada alumno activo
+//   4. Baja: módulo separado con tabla + buscador
+//   5. Egresados: tabla con buscador
+//   6. Todos los módulos tienen buscador propio
+// ============================================================
+
+const GRADE_PAL = {
+  escuelaVida:  {bg:'#FEFCE8',text:'#854D0E',bar:'#EAB308',dark:'#713F12',badge:'#FEF9C3',bdTxt:'#A16207'},
+  consolidacion:{bg:'#F0FDF4',text:'#166534',bar:'#22C55E',dark:'#14532D',badge:'#DCFCE7',bdTxt:'#15803D'},
+  obreros1:     {bg:'#FFF1F2',text:'#9F1239',bar:'#F43F5E',dark:'#881337',badge:'#FFE4E6',bdTxt:'#BE123C'},
+  obreros2:     {bg:'#EFF6FF',text:'#1E40AF',bar:'#3B82F6',dark:'#1E3A8A',badge:'#DBEAFE',bdTxt:'#1D4ED8'},
+};
+const G_ICON = {escuelaVida:'📖',consolidacion:'🌱',obreros1:'⚒️',obreros2:'🏛️'};
+
+const SchoolsModule = (() => {
+  let _d=null, _grade='', _mod='students'; // _grade es la variable de estado — NO la función
+  // Búsquedas por módulo
+  let _srch={students:'',classes:'',bajas:'',graduates:''};
+
+  // H.esc: escapa comillas simples para uso en onclick="..." inline HTML
+  // DEBE estar al inicio del módulo — se usa en _enrList y otras funciones
+  H.esc = str => (str||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
+
+  // ── RENDER ──────────────────────────────────────────────────
+  async function render(params) {
+    const el = document.getElementById('sect-schools');
+    if (!el) return;
+    if (!APP.user) { el.innerHTML=spin(); setTimeout(()=>render(params),300); return; }
+    const u = APP.user;
+    _grade = (params&&params.grade) || (u.role==='maestro'?u.assignedGrade||'':'') || CONFIG.GRADE_KEYS[0];
+    el.innerHTML = spin();
+    try {
+      await _fetch(_grade, false);
+      el.innerHTML = _shell(u);
+      _go(_mod);
+    } catch(e) { el.innerHTML = _err(e.message); }
+  }
+
+  // Caché de datos por grado — evita re-fetch al volver a un grado ya visitado
+  const _cache = {};
+
+  async function _fetch(grade, force) {
+    const key = grade || 'all';
+    if (!force && _cache[key]) {
+      _d = _cache[key];
+      return;
+    }
+    const gp = APP.user?.role==='admin' ? '' : grade;
+    let raw = await API.getSchoolData(gp, force);
+    if (!raw||typeof raw!=='object') throw new Error('Respuesta inválida del servidor');
+    if (raw.ok!==undefined&&raw.data) raw=raw.data;
+    raw.enrollments    = raw.enrollments    || {};
+    raw.people         = raw.people         || [];
+    raw.classes        = raw.classes        || [];
+    raw.attendance     = raw.attendance     || [];
+    raw.questionnaires = raw.questionnaires || [];
+    CONFIG.GRADE_KEYS.forEach(k => { if(!raw.enrollments[k]) raw.enrollments[k]=[]; });
+    _cache[key] = raw;
+    _d = raw;
+  }
+
+  // Invalida caché de un grado (tras mutaciones)
+  function _evict() {
+    const key = APP.user?.role==='admin' ? 'all' : (_grade || 'all');
+    delete _cache[key];
+  }
+
+  // ── SHELL ────────────────────────────────────────────────────
+  function _shell(u) {
+    const p   = GRADE_PAL[_grade];
+    const enrs= _d.enrollments[_grade]||[];
+    const tot = enrs.length;
+    const act = enrs.filter(_act).length;
+    const apv = enrs.filter(e=>['aprobado','approved'].includes((e.status||'').toLowerCase())).length;
+    const baj = enrs.filter(e=>['baja','dropped','suspendido'].includes((e.status||'').toLowerCase())).length;
+
+    const canEdit = ['admin','secretary'].includes(u.role);
+
+    // Grade pills con data-grade para update in-place
+    const pills = CONFIG.GRADE_KEYS.map(k => {
+      const kp  = GRADE_PAL[k];
+      const cnt = (_d.enrollments[k]||[]).filter(_act).length;
+      const isA = k===_grade;
+      return `<button class="grade-pill${isA?' active':''}" data-grade="${k}"
+        style="${isA?`background:${kp.bg};color:${kp.text};border-color:${kp.bar}`:''}"
+        onclick="SchoolsModule.switchGrade('${k}')">
+        <span>${G_ICON[k]}</span>
+        <span>${CONFIG.GRADES[k].label}</span>
+        <span class="grade-pill-cnt${isA?' active-cnt':''}"
+          style="${isA?`background:${kp.bar}30;color:${kp.text}`:''}">
+          <span class="gpill-cnt-val">${cnt}</span>
+        </span>
+      </button>`;
+    }).join('');
+
+    // Módulos — ahora como grade-bar horizontal (mismo estilo que los grados)
+    const MODS = [
+      {id:'students',      label:'Alumnos',       icon:'👥'},
+      {id:'classes',       label:'Clases',        icon:'📅'},
+      {id:'questionnaires',label:'Cuestionarios', icon:'📝'},
+      {id:'scores',        label:'Calificaciones',icon:'📊'},
+      {id:'bajas',         label:'Bajas',         icon:'📋'},
+      {id:'graduates',     label:'Egresados',     icon:'🎓'},
+    ];
+    const modPills = MODS.map(m => {
+      const isA = _mod===m.id;
+      return `<button class="grade-pill${isA?' active':''}" data-mod="${m.id}"
+        style="${isA?`background:${p.bg};color:${p.text};border-color:${p.bar}`:''}"
+        onclick="SchoolsModule._go('${m.id}')">
+        <span>${m.icon}</span>
+        <span>${m.label}</span>
+      </button>`;
+    }).join('');
+
+    return `
+      <div class="schools-wrap">
+        <!-- Hero compacto — banda lateral + nombre de la escuela + stats centradas -->
+        <div class="sch-hero-compact" id="sch-hero-compact">
+          <div class="sch-hero-band2" id="sch-hero-band"
+            style="background:linear-gradient(135deg,${p.bar},${p.dark})"></div>
+          <div class="sch-hero-compact-body">
+            <!-- Izquierda: icono + nombre escuela -->
+            <div class="sch-hero-compact-left">
+              <div class="sch-hero-compact-icon" id="sch-hero-icon"
+                style="background:${p.bar}18;color:${p.bar};border-color:${p.bar}40">
+                ${G_ICON[_grade]}
+              </div>
+              <div>
+                <div class="sch-hero-compact-eyebrow">Formación Ministerial</div>
+                <div class="sch-hero-compact-title" id="sch-hero-title">${CONFIG.GRADES[_grade].label}</div>
+              </div>
+            </div>
+            <!-- Centro: stats bar -->
+            <div class="alumnos-stats-bar" style="flex:1;max-width:480px">
+              <div class="alumno-stat">
+                <div class="alumno-stat-val" id="sch-stat-tot" style="color:${p.bar}">${tot}</div>
+                <div class="alumno-stat-lbl">Total</div>
+              </div>
+              <div class="alumno-stat-div"></div>
+              <div class="alumno-stat">
+                <div class="alumno-stat-val" id="sch-stat-act" style="color:${p.bar}">${act}</div>
+                <div class="alumno-stat-lbl">En curso</div>
+              </div>
+              <div class="alumno-stat-div"></div>
+              <div class="alumno-stat">
+                <div class="alumno-stat-val" id="sch-stat-apv" style="color:#16A34A">${apv}</div>
+                <div class="alumno-stat-lbl">Aprobados</div>
+              </div>
+              <div class="alumno-stat-div"></div>
+              <div class="alumno-stat">
+                <div class="alumno-stat-val" id="sch-stat-baj" style="color:#D97706">${baj}</div>
+                <div class="alumno-stat-lbl">Bajas</div>
+              </div>
+            </div>
+            <!-- Derecha: botón inscribir -->
+            ${canEdit?`<button class="btn btn-sm" style="background:${p.bar};color:#fff;border-color:${p.bar};white-space:nowrap" onclick="SchoolsModule.openEnrollModal()">${IC.add} Inscribir</button>`:''}
+          </div>
+        </div>
+
+        <div style="padding:0 24px">
+          <!-- Selector de grado — igual al original schools-grade-bar -->
+          <div class="schools-grade-bar" style="margin-bottom:12px">${pills}</div>
+
+          <!-- Selector de módulo — mismo estilo que grade-bar -->
+          <div class="schools-grade-bar" style="margin-bottom:20px">${modPills}</div>
+
+          <!-- Contenido del módulo activo -->
+          <div class="schools-content" id="sch-c"></div>
+        </div>
+      </div>`;
+  }
+
+  // ── SWITCH GRADE ────────────────────────────────────────────
+  // NO destruye el shell — solo actualiza pills, stats y contenido.
+  // Usa caché: si el grado ya fue cargado, no hace fetch.
+  async function switchGrade(grade) {
+    if (_grade === grade) return; // ya estamos en ese grado
+    _grade = grade;
+    _srch  = {students:'',classes:'',bajas:'',graduates:''};
+
+    const p   = GRADE_PAL[grade];
+    const isCached = !!_cache[APP.user?.role==='admin'?'all':grade];
+
+    // Actualizar pills activos inmediatamente (sin esperar fetch)
+    document.querySelectorAll('.grade-pill').forEach(btn => {
+      const k   = btn.dataset.grade;
+      const kp  = GRADE_PAL[k] || GRADE_PAL.escuelaVida;
+      const isA = k === grade;
+      btn.className = `grade-pill${isA?' active':''}`;
+      if (isA) {
+        btn.style.background   = kp.bg;
+        btn.style.color        = kp.text;
+        btn.style.borderColor  = kp.bar;
+      } else {
+        btn.style.background  = '';
+        btn.style.color       = '';
+        btn.style.borderColor = '';
+      }
+      const cnt = btn.querySelector('.grade-pill-cnt');
+      if (cnt) {
+        cnt.className = `grade-pill-cnt${isA?' active-cnt':''}`;
+        cnt.style.background = isA ? `${kp.bar}30` : '';
+        cnt.style.color      = isA ? kp.text : '';
+      }
+    });
+
+    // Actualizar hero: icono, título, banda de color, stats
+    _updateHero();
+
+    // Actualizar módulos nav color
+    document.querySelectorAll('.module-nav-btn').forEach(b => {
+      const isA = b.id === `mnb-${_mod}`;
+      b.style.borderLeftColor = isA ? p.bar : 'transparent';
+      b.style.color           = isA ? p.text : '';
+    });
+
+    // Mostrar spinner solo en el área de contenido (no el shell entero)
+    const content = document.getElementById('sch-c');
+    if (content) content.innerHTML = spin();
+
+    try {
+      await _fetch(grade, false); // usa caché si existe
+
+      // Actualizar stats tras cargar datos
+      _updateHero();
+
+      // Actualizar conteos en pills
+      document.querySelectorAll('.grade-pill').forEach(btn => {
+        const k   = btn.dataset.grade;
+        const cntEl = btn.querySelector('.grade-pill-cnt');
+        if (cntEl) cntEl.textContent = (_d.enrollments[k]||[]).filter(_act).length;
+      });
+
+      _go(_mod);
+    } catch(e) {
+      if (content) content.innerHTML = _err(e.message);
+    }
+  }
+
+  // Actualiza el hero (icono, título, banda, stats) sin re-renderizar el shell
+  function _updateHero() {
+    const p    = GRADE_PAL[_grade];
+    const enrs = _d ? (_d.enrollments[_grade]||[]) : [];
+
+    // Banda lateral de color
+    const band = document.getElementById('sch-hero-band');
+    if (band) band.style.background = `linear-gradient(135deg,${p.bar},${p.dark})`;
+
+    // Icono + título
+    const icon = document.getElementById('sch-hero-icon');
+    if (icon) { icon.textContent = G_ICON[_grade]; icon.style.color=p.bar; icon.style.background=`${p.bar}18`; icon.style.borderColor=`${p.bar}40`; }
+
+    const title = document.getElementById('sch-hero-title');
+    if (title) title.textContent = CONFIG.GRADES[_grade].label;
+
+    // Stats
+    if (!_d) return;
+    const tot  = enrs.length;
+    const act  = enrs.filter(_act).length;
+    const apv  = enrs.filter(e=>['aprobado','approved'].includes((e.status||'').toLowerCase())).length;
+    const baj  = enrs.filter(e=>['baja','dropped','suspendido'].includes((e.status||'').toLowerCase())).length;
+
+    const sv = id => document.getElementById(id);
+    if (sv('sch-stat-tot')) { sv('sch-stat-tot').textContent=tot+''; sv('sch-stat-tot').style.color=p.bar; }
+    if (sv('sch-stat-act')) { sv('sch-stat-act').textContent=act+''; sv('sch-stat-act').style.color=p.bar; }
+    if (sv('sch-stat-apv')) sv('sch-stat-apv').textContent=apv+'';
+    if (sv('sch-stat-baj')) sv('sch-stat-baj').textContent=baj+'';
+  }
+
+  // ── SWITCH MOD ──────────────────────────────────────────────
+  function _go(mod) {
+    _mod = mod;
+    const pal = GRADE_PAL[_grade];
+    // Actualizar pills de módulo (data-mod)
+    document.querySelectorAll('[data-mod]').forEach(b => {
+      const isA = b.dataset.mod === mod;
+      b.className = `grade-pill${isA?' active':''}`;
+      if (isA) {
+        b.style.background  = pal.bg;
+        b.style.color       = pal.text;
+        b.style.borderColor = pal.bar;
+      } else {
+        b.style.background  = '';
+        b.style.color       = '';
+        b.style.borderColor = '';
+      }
+    });
+    const c = document.getElementById('sch-c');
+    if (!c) return;
+    if (mod==='students')       c.innerHTML = _modStudents();
+    if (mod==='classes')        c.innerHTML = _modClasses();
+    if (mod==='questionnaires') _modQuests(c);
+    if (mod==='scores')         c.innerHTML = _modScores();
+    if (mod==='bajas')          c.innerHTML = _modBajas();
+    if (mod==='graduates')      c.innerHTML = _modGraduates();
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // MÓD: ALUMNOS
+  // ═══════════════════════════════════════════════════════════
+  function _modStudents() {
+    const p     = GRADE_PAL[_grade];
+    const enrs  = (_d.enrollments[_grade]||[]).filter(_act);
+    const pmap  = _pm();
+    const ce    = ['admin','secretary'].includes(APP.user?.role);
+    const isAdm = APP.user?.role==='admin';
+    const q     = _srch.students;
+    const flt   = q ? enrs.filter(e=>{const p=pmap[e.personId]||{};return _m(`${p.name||''} ${p.lastName||''} ${p.phone||''} ${p.email||''}`,q);}) : enrs;
+
+    const hdr = `
+      <div class="schools-module-header">
+        <div class="schools-module-title-wrap">
+          <div class="module-header-icon" style="background:${p.bar}18;border-color:${p.bar}40;color:${p.bar}">${IC.people}</div>
+          <div>
+            <h2 class="schools-module-title">${G_ICON[_grade]} ${CONFIG.GRADES[_grade].label} — Alumnos</h2>
+            <div class="schools-module-sub">${enrs.length} inscriptos activos</div>
+          </div>
+        </div>
+        <div class="schools-module-actions">
+          ${_searchBox('students','Buscar alumno…','SchoolsModule._srchStudents')}
+          <button class="btn btn-ghost btn-sm" onclick="SchoolsModule._expStudents()" title="Exportar CSV">${IC.download}</button>
+          ${ce?`<button class="btn btn-primary" style="background:${p.bar};border-color:${p.bar}" onclick="SchoolsModule.openEnrollModal()">${IC.add} Inscribir</button>`:''}
+          ${isAdm?`<button class="btn btn-sm" style="background:${p.bg};color:${p.text};border:1.5px solid ${p.bar}40" onclick="SchoolsModule.openBulkGraduate()">${IC.graduation} Egreso masivo</button>`:''}
+        </div>
+      </div>`;
+
+    if (!enrs.length) return hdr+`<div class="schools-empty">
+      <div class="schools-empty-icon">${G_ICON[_grade]}</div>
+      <div class="schools-empty-title">Sin alumnos inscriptos</div>
+      <div class="schools-empty-sub">Aún no hay alumnos en ${CONFIG.GRADES[_grade].label}</div>
+      ${ce?`<button class="btn btn-primary" style="margin-top:8px;background:${p.bar};border-color:${p.bar}" onclick="SchoolsModule.openEnrollModal()">${IC.add} Inscribir primera persona</button>`:''}
+    </div>`;
+
+    const sHdrs = CONFIG.SCORE_FIELDS.map(f=>`<th class="tc" title="${CONFIG.SCORE_LABELS[f]}">${CONFIG.SCORE_LABELS[f].split(' ')[0]}</th>`).join('');
+    const rows  = flt.map(e => {
+      const pp  = pmap[e.personId]||{};
+      const sc  = e.scores||{};
+      const avg = H.calcAverage(sc);
+      const att = _attpct(e.enrollmentId);
+      const ac  = att>=75?'#16A34A':att>=50?'#D97706':'#DC2626';
+      const nm  = `${pp.name||'?'} ${pp.lastName||''}`.trim();
+      const sch = CONFIG.SCORE_FIELDS.map(f=>{
+        const v=sc[f]; if(v===''||v===null||v===undefined)return`<td class="tc"><span style="color:var(--text-muted)">—</span></td>`;
+        const n=parseFloat(v),bg=n>=8?'#DCFCE7':n>=6?'#DBEAFE':'#FFE4E6',tx=n>=8?'#166534':n>=6?'#1D4ED8':'#9F1239';
+        return `<td class="tc"><span class="avg-badge" style="background:${bg};color:${tx}">${n.toFixed(1)}</span></td>`;
+      }).join('');
+      const avH = avg!==null?(()=>{const bg=avg>=8?'#DCFCE7':avg>=6?'#DBEAFE':'#FFE4E6',tx=avg>=8?'#166534':avg>=6?'#1D4ED8':'#9F1239';return`<span class="avg-badge" style="background:${bg};color:${tx};font-weight:800">${avg.toFixed(1)}</span>`;})():`<span style="color:var(--text-muted)">—</span>`;
+      return `<tr>
+        <td>${_pcell(pp,p)}</td>
+        <td><div style="display:flex;align-items:center;gap:6px;min-width:80px">
+          <div style="flex:1;height:5px;background:var(--border-soft);border-radius:3px;overflow:hidden">
+            <div style="height:100%;width:${att}%;background:${ac};border-radius:3px"></div>
+          </div>
+          <span style="font-size:11px;font-weight:600;color:${ac};white-space:nowrap">${att}%</span>
+        </div></td>
+        ${sch}<td class="tc">${avH}</td>
+        ${ce?`<td><div class="tbl-acts">
+          <button class="btn-tbl-icon btn-tbl-edit" title="Calificaciones" onclick="SchoolsModule.openScoreModal('${e.enrollmentId}','${H.esc(nm)}')" style="color:${p.bar}">${IC.edit}</button>
+          <button class="btn-tbl-icon btn-tbl-edit" title="Egreso" onclick="SchoolsModule.openEgresoModal('${e.enrollmentId}','${H.esc(nm)}')" style="color:#16A34A">${IC.graduation}</button>
+          <button class="btn-tbl-icon btn-tbl-edit" title="Dar de baja" onclick="SchoolsModule.openBajaModal('${e.enrollmentId}','${H.esc(nm)}')" style="color:#DC2626">${IC.trash}</button>
+        </div></td>`:''}
+      </tr>`;
+    }).join('');
+
+    return hdr+`<div class="card" style="overflow:hidden">
+      <div style="overflow-x:auto"><table class="table">
+        <thead><tr style="border-bottom:2px solid ${p.bar}30">
+          <th>Alumno</th><th>Asistencia</th>${sHdrs}<th class="tc">Prom.</th>${ce?'<th class="tr">Acciones</th>':''}
+        </tr></thead>
+        <tbody>${rows||_emptyTr()}</tbody>
+      </table></div>
+    </div>`;
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // MÓD: CLASES
+  // ═══════════════════════════════════════════════════════════
+  function _modClasses() {
+    const p     = GRADE_PAL[_grade];
+    const ce    = ['admin','secretary'].includes(APP.user?.role);
+    const all   = (_d.classes||[]).filter(c=>!c.grade||c.grade===_grade);
+    const q     = _srch.classes;
+    const flt   = q ? H.filterBySearch(all,q,['title','status','scheduledDate']) : all;
+    const srt   = H.sortBy(flt,'scheduledDate','desc');
+
+    const hdr=`<div class="schools-module-header">
+      <div class="schools-module-title-wrap">
+        <div class="module-header-icon" style="background:${p.bar}18;border-color:${p.bar}40;color:${p.bar}">${IC.schools}</div>
+        <div><h2 class="schools-module-title">${G_ICON[_grade]} Clases</h2>
+        <div class="schools-module-sub">${all.length} clases registradas</div></div>
+      </div>
+      <div class="schools-module-actions">
+        ${_searchBox('classes','Buscar clase…','SchoolsModule._srchClasses')}
+        ${ce?`<button class="btn btn-primary" style="background:${p.bar};border-color:${p.bar}" onclick="SchoolsModule.openClassModal()">${IC.add} Nueva clase</button>`:''}
+      </div>
+    </div>`;
+
+    if (!all.length) return hdr+`<div class="schools-empty"><div class="schools-empty-icon">📅</div>
+      <div class="schools-empty-title">Sin clases</div>
+      <div class="schools-empty-sub">Registrá la primera clase para este grado.</div>
+      ${ce?`<button class="btn btn-primary" style="margin-top:8px;background:${p.bar};border-color:${p.bar}" onclick="SchoolsModule.openClassModal()">${IC.add} Nueva clase</button>`:''}
+    </div>`;
+
+    const prog=srt.filter(c=>c.status==='programada');
+    const done=srt.filter(c=>c.status==='realizada');
+    const canc=srt.filter(c=>c.status==='cancelada');
+
+    const section=(list,lbl,icon)=>!list.length?'': `
+      <div class="classes-sections">
+        <div class="classes-section-header">
+          <span class="classes-section-icon">${icon}</span>
+          <span class="classes-section-title">${lbl}</span>
+          <span class="classes-section-cnt">${list.length}</span>
+        </div>
+        <div class="classes-grid">${list.map(c=>_classCard(c,p,ce)).join('')}</div>
+      </div>`;
+
+    return hdr+section(prog,'Programadas','📅')+section(done,'Realizadas','✅')+section(canc,'Canceladas','❌');
+  }
+
+  function _classCard(cls,p,ce) {
+    const entCnt = (_d.enrollments[_grade]||[]).filter(_act).length;
+    const attCnt = (_d.attendance||[]).filter(a=>a.classId===cls.id).length;
+    const qCnt   = (_d.questionnaires||[]).filter(q=>q.classId===cls.id).length;
+    const stC    = cls.status==='realizada'?'#16A34A':cls.status==='cancelada'?'#92400E':'#1D4ED8';
+    const stBg   = cls.status==='realizada'?'#DCFCE7':cls.status==='cancelada'?'#FEF9C3':'#DBEAFE';
+    const d      = cls.scheduledDate?new Date(cls.scheduledDate+'T12:00:00'):null;
+    const dStr   = d?d.toLocaleDateString('es-AR',{weekday:'short',day:'numeric',month:'short'}):'—';
+    return `<div class="class-card-v2">
+      <div class="class-card-v2-accent" style="background:${p.bar}"></div>
+      <div class="class-card-v2-body">
+        <div class="class-card-v2-head">
+          <div class="class-card-v2-date">${IC.calendar} ${dStr}</div>
+          <span class="class-status-pill" style="background:${stBg};color:${stC}">${cls.status||'—'}</span>
+        </div>
+        <div class="class-card-v2-title">${H.escape(cls.title)}</div>
+        ${cls.description?`<div class="class-card-v2-desc">${H.escape(cls.description)}</div>`:''}
+        <div class="class-card-v2-chips">
+          ${cls.status==='realizada'?`<span class="class-chip class-chip-att">✓ ${attCnt}/${entCnt} asist.</span>`:''}
+          ${qCnt?`<span class="class-chip class-chip-quest">📝 ${qCnt} cuest.</span>`:''}
+        </div>
+        ${ce?`<div class="class-card-v2-actions">
+          <button class="btn-module btn-module-att" onclick="SchoolsModule.openAttPanel('${cls.id}','${H.esc(cls.title)}')">✓ Asistencia</button>
+          <button class="btn-module btn-module-quest" onclick="SchoolsModule.openQuestModal('${cls.id}','${H.esc(cls.title)}')">📝 Cuestionarios</button>
+          <button class="btn-module btn-module-edit" onclick="SchoolsModule.openClassModal(${JSON.stringify(cls).replace(/"/g,'&quot;')})">${IC.edit}</button>
+          <button class="btn-module btn-module-edit" style="color:#DC2626;border-color:#FECDD3" onclick="SchoolsModule.delClass('${cls.id}','${H.esc(cls.title)}')">${IC.trash}</button>
+        </div>`:''}
+      </div>
+    </div>`;
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // MÓD: CUESTIONARIOS
+  // ═══════════════════════════════════════════════════════════
+  async function _modQuests(container) {
+    const p   = GRADE_PAL[_grade];
+    const ce  = ['admin','secretary','maestro'].includes(APP.user?.role);
+    const cls = (_d.classes||[]).filter(c=>(!c.grade||c.grade===_grade)&&c.status==='realizada');
+
+    container.innerHTML = `
+      <div class="schools-module-header">
+        <div class="schools-module-title-wrap">
+          <div class="module-header-icon" style="background:${p.bar}18;border-color:${p.bar}40;color:${p.bar}">${IC.edit}</div>
+          <div><h2 class="schools-module-title">${G_ICON[_grade]} Cuestionarios</h2>
+          <div class="schools-module-sub">${cls.length} clases realizadas</div></div>
+        </div>
+      </div>
+      ${!cls.length?`<div class="schools-empty"><div class="schools-empty-icon">📝</div>
+        <div class="schools-empty-title">Sin clases realizadas</div>
+        <div class="schools-empty-sub">Los cuestionarios se asignan a clases que ya se realizaron.</div>
+      </div>`:'<div id="quest-body" style="display:flex;flex-direction:column;gap:16px"><div class="sect-loading"><div class="spinner"></div></div></div>'}`;
+
+    if (!cls.length) return;
+
+    const pmap = _pm();
+    const enrs = (_d.enrollments[_grade]||[]).filter(_act);
+    const body = container.querySelector('#quest-body');
+    body.innerHTML = '';
+
+    for (const cl of cls) {
+      const quests = await API.getQuestionnaires(cl.id).catch(()=>[]);
+      const qmap   = {};
+      quests.forEach(q=>{ if(q.enrollmentId) qmap[q.enrollmentId]=q; });
+      const entregados = quests.filter(q=>q.status==='entregado').length;
+      const pendientes = enrs.length - entregados;
+      const avgQ = entregados ? (quests.filter(q=>q.status==='entregado').reduce((a,q)=>a+(parseFloat(q.score||q.nota)||0),0)/entregados).toFixed(1) : '—';
+      const d    = cl.scheduledDate?new Date(cl.scheduledDate+'T12:00:00').toLocaleDateString('es-AR',{day:'numeric',month:'short'}):'';
+
+      const cards = enrs.map(e=>{
+        const pp = pmap[e.personId]||{};
+        const q  = qmap[e.enrollmentId];
+        const nm = `${pp.name||'?'} ${pp.lastName||''}`.trim();
+        const ent= q&&q.status==='entregado';
+        const nota= q?(q.score||q.nota||''):'';
+        const stC = ent?'#16A34A':'#D97706', stBg=ent?'#DCFCE7':'#FEF9C3';
+        return `<div class="quest-student-card" style="border-top-color:${ent?'#22C55E':q?'#F59E0B':p.bar}">
+          <div class="quest-sc-head">
+            <div class="avatar" style="background:${p.bar}22;color:${p.text};width:32px;height:32px;font-size:11px">${H.initials(nm)}</div>
+            <div class="quest-sc-info">
+              <div class="quest-sc-name">${H.escape(pp.name||'?')} ${H.escape(pp.lastName||'')}</div>
+              ${q?`<span class="quest-sc-status" style="background:${stBg};color:${stC}">${ent?'Entregado':'Pendiente'}</span>`:`<span class="quest-sc-status" style="background:var(--bg-subtle);color:var(--text-muted)">Sin cuest.</span>`}
+            </div>
+            ${ent?`<div class="quest-sc-nota" style="color:${parseFloat(nota)>=6?'#16A34A':'#DC2626'}">${parseFloat(nota).toFixed(1)}</div>`:''}
+          </div>
+          ${ce?`<div style="display:flex;gap:6px;flex-direction:column">
+            ${q&&!ent?`<div style="display:flex;gap:6px;align-items:center">
+              <input type="number" min="0" max="10" step="0.1" id="qn-${q.id}"
+                style="flex:1;padding:6px 8px;border:1.5px solid var(--border-soft);border-radius:8px;font-size:13px;text-align:center"
+                placeholder="Nota 0–10">
+              <button class="btn btn-sm quest-sc-btn" style="background:${p.bar};color:#fff;border:none;white-space:nowrap"
+                onclick="SchoolsModule._qSubmit('${q.id}','${cl.id}','${H.esc(cl.title)}','${H.esc(nm)}')">
+                Calificar
+              </button>
+            </div>`:''}
+            ${q?`<button class="btn btn-sm" style="background:#FEF2F2;color:#DC2626;border:1.5px solid #FECDD3"
+              onclick="SchoolsModule._qDel('${q.id}','${cl.id}','${H.esc(cl.title)}')">Quitar cuestionario</button>`
+              :`<button class="btn btn-sm" style="background:${p.bar}18;color:${p.text};border:1.5px solid ${p.bar}40"
+              onclick="SchoolsModule._qAdd('${cl.id}','${e.enrollmentId}','${e.personId}','${H.esc(cl.title)}','${H.esc(nm)}')">
+              + Asignar cuestionario</button>`}
+          </div>`:''}
+        </div>`;
+      }).join('');
+
+      const sec = document.createElement('div');
+      sec.className = 'quest-group-v2';
+      sec.innerHTML = `
+        <div class="quest-group-v2-header">
+          <div class="quest-group-v2-left">
+            <div class="quest-group-v2-icon">📝</div>
+            <div>
+              <div class="quest-group-v2-title">${H.escape(cl.title)}</div>
+              <div class="quest-group-v2-sub">
+                <span class="quest-chip quest-ok">✓ ${entregados} entregados</span>
+                ${pendientes>0?`<span class="quest-chip quest-pending">⏳ ${pendientes} pendientes</span>`:''}
+                ${avgQ!=='—'?`<span class="quest-chip quest-avg">Prom: ${avgQ}</span>`:''}
+              </div>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px">
+            <div class="quest-group-v2-pct-wrap">
+              <div class="quest-pct-val" style="color:${p.bar}">${d}</div>
+              <div class="quest-pct-sub">Fecha clase</div>
+            </div>
+            ${ce?`<button class="btn btn-sm" style="background:${p.bar};color:#fff;border-color:${p.bar}"
+              onclick="SchoolsModule._qAssignAll('${cl.id}','${H.esc(cl.title)}')">
+              Asignar a todos
+            </button>`:''}
+          </div>
+        </div>
+        <div class="quest-students-grid">${cards||`<div style="padding:20px;color:var(--text-muted);font-size:13px">Sin alumnos activos</div>`}</div>`;
+      body.appendChild(sec);
+    }
+  }
+
+  async function _qAdd(clId,enrId,perId,clTitle,nm) {
+    try{await API.saveQuestionnaire({classId:clId,enrollmentId:enrId,personId:perId,title:clTitle,grade:_grade});Toast.success(`Cuestionario creado — ${nm}`);_refreshQuests();}
+    catch(e){Toast.error(e.message);}
+  }
+  async function _qAssignAll(clId,clTitle) {
+    const enrs = (_d.enrollments[_grade]||[]).filter(_act);
+    const existing = await API.getQuestionnaires(clId).catch(()=>[]);
+    const existIds = new Set(existing.map(q=>q.enrollmentId));
+    const pending  = enrs.filter(e=>!existIds.has(e.enrollmentId));
+    if(!pending.length){Toast.info('Todos los alumnos ya tienen cuestionario');return;}
+    try{
+      await Promise.all(pending.map(e=>API.saveQuestionnaire({classId:clId,enrollmentId:e.enrollmentId,personId:e.personId,title:clTitle,grade:_grade})));
+      Toast.success(`${pending.length} cuestionarios creados`);_refreshQuests();
+    }catch(e){Toast.error(e.message);}
+  }
+  async function _qSubmit(qId,clId,clTitle,nm) {
+    const inp=document.getElementById(`qn-${qId}`);if(!inp)return;
+    const nota=parseFloat(inp.value);
+    if(isNaN(nota)||nota<0||nota>10){Toast.error('Nota inválida (0–10)');inp.focus();return;}
+    try{await API.submitQuestionnaire(qId,nota);Toast.success(`Nota guardada — ${nm}`);_refreshQuests();}
+    catch(e){Toast.error(e.message);}
+  }
+  async function _qDel(qId,clId,clTitle) {
+    const ok=await Modal.confirm({title:'Quitar cuestionario',message:'¿Eliminar este cuestionario y su nota?',confirmText:'Eliminar'});
+    if(!ok)return;
+    try{await API.deleteQuestionnaire(qId);Toast.success('Cuestionario eliminado');_refreshQuests();}
+    catch(e){Toast.error(e.message);}
+  }
+  function _refreshQuests(){const c=document.getElementById('sch-c');if(c)_modQuests(c);}
+
+  // Modal cuestionarios desde card de clase (btn 📝)
+  async function openQuestModal(clId,clTitle) {
+    const p    = GRADE_PAL[_grade];
+    const enrs = (_d.enrollments[_grade]||[]).filter(_act);
+    const pmap = _pm();
+    Modal.open({title:`Cuestionarios — ${clTitle}`,size:'lg',body:`<div class="modal-loading"><div class="spinner"></div></div>`});
+    const quests = await API.getQuestionnaires(clId).catch(()=>[]);
+    const qmap   = {};quests.forEach(q=>{if(q.enrollmentId)qmap[q.enrollmentId]=q;});
+    const existIds=new Set(quests.map(q=>q.enrollmentId));
+    const pending =enrs.filter(e=>!existIds.has(e.enrollmentId));
+    const rows=enrs.map(e=>{
+      const pp=pmap[e.personId]||{};const q=qmap[e.enrollmentId];
+      const nm=`${pp.name||'?'} ${pp.lastName||''}`.trim();
+      const ent=q&&q.status==='entregado';const nota=q?(q.score||q.nota||''):'';
+      return`<tr>
+        <td>${_pcell(pp,p)}</td>
+        <td>${q?`<span style="font-size:11px;padding:2px 8px;border-radius:20px;font-weight:600;background:${ent?'#DCFCE7':'#FEF9C3'};color:${ent?'#166534':'#92400E'}">${ent?'Entregado':'Pendiente'}</span>`:'<span style="font-size:12px;color:var(--text-muted)">Sin asignar</span>'}</td>
+        <td class="tc">${ent?`<span class="avg-badge" style="background:${parseFloat(nota)>=6?'#DCFCE7':'#FFE4E6'};color:${parseFloat(nota)>=6?'#166534':'#9F1239'}">${parseFloat(nota).toFixed(1)}</span>`:'—'}</td>
+        <td><div class="tbl-acts">
+          ${!q?`<button class="btn btn-sm" style="background:${p.bar}18;color:${p.text};border:1.5px solid ${p.bar}40"
+            onclick="SchoolsModule._qAdd('${clId}','${e.enrollmentId}','${e.personId}','${H.esc(clTitle)}','${H.esc(nm)}')">+ Asignar</button>`:''}
+          ${q&&!ent?`<input type="number" min="0" max="10" step="0.1" id="qm-${q.id}" style="width:56px;padding:4px;border:1.5px solid var(--border-soft);border-radius:6px;font-size:13px;text-align:center" placeholder="Nota">
+            <button class="btn btn-sm" style="background:${p.bar};color:#fff;border-color:${p.bar}" onclick="SchoolsModule._qSubmitM('${q.id}','${clId}','${H.esc(clTitle)}','${H.esc(nm)}')">Calificar</button>`:''}
+          ${q?`<button class="btn btn-sm" style="background:#FEF2F2;color:#DC2626;border:1px solid #FECDD3" onclick="SchoolsModule._qDelM('${q.id}','${clId}','${H.esc(clTitle)}')">Quitar</button>`:''}
+        </div></td>
+      </tr>`;
+    }).join('');
+    Modal.setBody(`
+      ${pending.length?`<div style="margin-bottom:12px"><button class="btn btn-sm" style="background:${p.bar};color:#fff;border-color:${p.bar}" onclick="SchoolsModule._qAssignAll('${clId}','${H.esc(clTitle)}')">${IC.add} Asignar cuestionario a todos (${pending.length} sin asignar)</button></div>`:''}
+      <div style="overflow-x:auto"><table class="table">
+        <thead><tr><th>Alumno</th><th>Estado</th><th class="tc">Nota</th><th>Acción</th></tr></thead>
+        <tbody>${rows||_emptyTr()}</tbody>
+      </table></div>`);
+  }
+  async function _qSubmitM(qId,clId,clTitle,nm){
+    const inp=document.getElementById(`qm-${qId}`);if(!inp)return;
+    const nota=parseFloat(inp.value);if(isNaN(nota)||nota<0||nota>10){Toast.error('Nota inválida');inp.focus();return;}
+    try{await API.submitQuestionnaire(qId,nota);Toast.success(`Nota guardada — ${nm}`);openQuestModal(clId,clTitle);}catch(e){Toast.error(e.message);}
+  }
+  async function _qDelM(qId,clId,clTitle){
+    const ok=await Modal.confirm({title:'Quitar cuestionario',message:'¿Eliminar este cuestionario?',confirmText:'Eliminar'});
+    if(!ok)return;
+    try{await API.deleteQuestionnaire(qId);Toast.success('Eliminado');openQuestModal(clId,clTitle);}catch(e){Toast.error(e.message);}
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // MÓD: CALIFICACIONES
+  // ═══════════════════════════════════════════════════════════
+  function _modScores() {
+    const p   = GRADE_PAL[_grade];
+    const enrs= (_d.enrollments[_grade]||[]).filter(_act);
+    const pmap= _pm();
+    const ce  = ['admin','secretary','maestro'].includes(APP.user?.role);
+
+    const hdr=`<div class="schools-module-header">
+      <div class="schools-module-title-wrap">
+        <div class="module-header-icon" style="background:${p.bar}18;border-color:${p.bar}40;color:${p.bar}">${IC.star}</div>
+        <div><h2 class="schools-module-title">${G_ICON[_grade]} Calificaciones</h2>
+        <div class="schools-module-sub">${enrs.length} alumnos activos</div></div>
+      </div>
+    </div>`;
+
+    if(!enrs.length)return hdr+`<div class="schools-empty"><div class="schools-empty-icon">📊</div><div class="schools-empty-title">Sin alumnos</div></div>`;
+    const sHdrs=CONFIG.SCORE_FIELDS.map(f=>`<th class="tc" title="${CONFIG.SCORE_LABELS[f]}">${CONFIG.SCORE_LABELS[f].split(' ')[0]}</th>`).join('');
+    const rows=enrs.map(e=>{
+      const pp=pmap[e.personId]||{};const sc=e.scores||{};const avg=H.calcAverage(sc);
+      const nm=`${pp.name||'?'} ${pp.lastName||''}`.trim();
+      const sch=CONFIG.SCORE_FIELDS.map(f=>{
+        const v=sc[f];if(v===''||v===null||v===undefined)return`<td class="tc"><span style="color:var(--text-muted)">—</span></td>`;
+        const n=parseFloat(v),bg=n>=8?'#DCFCE7':n>=6?'#DBEAFE':'#FFE4E6',tx=n>=8?'#166534':n>=6?'#1D4ED8':'#9F1239';
+        return`<td class="tc"><span class="avg-badge" style="background:${bg};color:${tx}">${n.toFixed(1)}</span></td>`;
+      }).join('');
+      const avH=avg!==null?(()=>{const bg=avg>=8?'#DCFCE7':avg>=6?'#DBEAFE':'#FFE4E6',tx=avg>=8?'#166534':avg>=6?'#1D4ED8':'#9F1239';return`<span class="avg-badge" style="background:${bg};color:${tx};font-weight:800">${avg.toFixed(1)}</span>`;})():`<span style="color:var(--text-muted)">—</span>`;
+      const ok=H.isComplete(sc);
+      return`<tr><td>${_pcell(pp,p)}</td>${sch}<td class="tc">${avH}</td>
+        <td class="tc"><span style="font-size:11px;padding:2px 8px;border-radius:20px;font-weight:600;background:${ok?'#DCFCE7':'#FEF9C3'};color:${ok?'#166534':'#92400E'}">${ok?'Completo':'Incompleto'}</span></td>
+        ${ce?`<td class="tr"><button class="btn-tbl-icon btn-tbl-edit" onclick="SchoolsModule.openScoreModal('${e.enrollmentId}','${H.esc(nm)}')" style="color:${p.bar}">${IC.edit}</button></td>`:''}
+      </tr>`;
+    }).join('');
+    return hdr+`<div class="card" style="overflow:hidden"><div style="overflow-x:auto"><table class="table">
+      <thead><tr style="border-bottom:2px solid ${p.bar}30"><th>Alumno</th>${sHdrs}<th class="tc">Prom.</th><th class="tc">Estado</th>${ce?'<th class="tr">Editar</th>':''}</tr></thead>
+      <tbody>${rows||_emptyTr()}</tbody>
+    </table></div></div>`;
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // MÓD: BAJAS
+  // ═══════════════════════════════════════════════════════════
+  function _modBajas() {
+    const p    = GRADE_PAL[_grade];
+    const enrs = (_d.enrollments[_grade]||[]).filter(e=>['baja','dropped','suspendido'].includes((e.status||'').toLowerCase()));
+    const pmap = _pm();
+    const q    = _srch.bajas;
+    const flt  = q ? enrs.filter(e=>{const pp=pmap[e.personId]||{};return _m(`${pp.name||''} ${pp.lastName||''} ${e.bajaMotivo||''}`,q);}) : enrs;
+
+    const hdr=`<div class="schools-module-header">
+      <div class="schools-module-title-wrap">
+        <div class="module-header-icon" style="background:#FEF2F2;border-color:#FECDD3;color:#DC2626">${IC.trash}</div>
+        <div><h2 class="schools-module-title">${G_ICON[_grade]} Bajas</h2>
+        <div class="schools-module-sub">${enrs.length} alumno${enrs.length!==1?'s':''} dado${enrs.length!==1?'s':''} de baja</div></div>
+      </div>
+      <div class="schools-module-actions">
+        ${_searchBox('bajas','Buscar…','SchoolsModule._srchBajas')}
+      </div>
+    </div>`;
+
+    if(!enrs.length)return hdr+`<div class="schools-empty"><div class="schools-empty-icon">📋</div><div class="schools-empty-title">Sin bajas</div><div class="schools-empty-sub">No hay alumnos dados de baja en este grado.</div></div>`;
+
+    const sHdrs=CONFIG.SCORE_FIELDS.map(f=>`<th class="tc" title="${CONFIG.SCORE_LABELS[f]}">${CONFIG.SCORE_LABELS[f].split(' ')[0]}</th>`).join('');
+    const rows=flt.map(e=>{
+      const pp=pmap[e.personId]||{};const sc=e.scores||{};const avg=H.calcAverage(sc);
+      const nm=`${pp.name||'?'} ${pp.lastName||''}`.trim();
+      const sch=CONFIG.SCORE_FIELDS.map(f=>{
+        const v=sc[f];if(v===''||v===null||v===undefined)return`<td class="tc"><span style="color:var(--text-muted)">—</span></td>`;
+        const n=parseFloat(v),bg=n>=8?'#DCFCE7':n>=6?'#DBEAFE':'#FFE4E6',tx=n>=8?'#166534':n>=6?'#1D4ED8':'#9F1239';
+        return`<td class="tc"><span class="avg-badge" style="background:${bg};color:${tx}">${n.toFixed(1)}</span></td>`;
+      }).join('');
+      const avH=avg!==null?(()=>{const bg=avg>=8?'#DCFCE7':avg>=6?'#DBEAFE':'#FFE4E6',tx=avg>=8?'#166534':avg>=6?'#1D4ED8':'#9F1239';return`<span class="avg-badge" style="background:${bg};color:${tx};font-weight:800">${avg.toFixed(1)}</span>`;})():`<span style="color:var(--text-muted)">—</span>`;
+      const motivo=e.bajaMotivo||e.dropReason||'';
+      const bajaDate=e.bajaAt||e.droppedAt||'';
+      return`<tr>
+        <td style="opacity:.8">${_pcell(pp,p)}</td>
+        <td style="font-size:12px;color:var(--text-secondary)">${H.escape(motivo||'—')}</td>
+        <td style="font-size:12px;color:var(--text-muted)">${H.date(bajaDate)||'—'}</td>
+        ${sch}<td class="tc">${avH}</td>
+      </tr>`;
+    }).join('');
+
+    return hdr+`<div class="card" style="overflow:hidden"><div style="overflow-x:auto"><table class="table">
+      <thead><tr style="border-bottom:2px solid #FECDD3"><th>Alumno</th><th>Motivo</th><th>Fecha baja</th>${sHdrs}<th class="tc">Prom.</th></tr></thead>
+      <tbody>${rows||_emptyTr()}</tbody>
+    </table></div></div>`;
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // MÓD: EGRESADOS
+  // ═══════════════════════════════════════════════════════════
+  function _modGraduates() {
+    const p    = GRADE_PAL[_grade];
+    const enrs = _d.enrollments[_grade]||[];
+    const pmap = _pm();
+    const apv  = enrs.filter(e=>['aprobado','approved'].includes((e.status||'').toLowerCase()));
+    const des  = enrs.filter(e=>['desaprobado','failed'].includes((e.status||'').toLowerCase()));
+    const q    = _srch.graduates;
+    const fApv = q?apv.filter(e=>{const pp=pmap[e.personId]||{};return _m(`${pp.name||''} ${pp.lastName||''}`,q);}):apv;
+    const fDes = q?des.filter(e=>{const pp=pmap[e.personId]||{};return _m(`${pp.name||''} ${pp.lastName||''}`,q);}):des;
+
+    const hdr=`<div class="schools-module-header">
+      <div class="schools-module-title-wrap">
+        <div class="module-header-icon" style="background:${p.bar}18;border-color:${p.bar}40;color:${p.bar}">${IC.graduation}</div>
+        <div><h2 class="schools-module-title">${G_ICON[_grade]} Egresados</h2>
+        <div class="schools-module-sub">${apv.length} aprobados · ${des.length} desaprobados</div></div>
+      </div>
+      <div class="schools-module-actions">
+        ${_searchBox('graduates','Buscar egresado…','SchoolsModule._srchGraduates')}
+      </div>
+    </div>`;
+
+    if(!apv.length&&!des.length)return hdr+`<div class="schools-empty"><div class="schools-empty-icon">🎓</div><div class="schools-empty-title">Sin egresados</div><div class="schools-empty-sub">Aún no hay alumnos egresados en este grado.</div></div>`;
+
+    const sHdrs=CONFIG.SCORE_FIELDS.map(f=>`<th class="tc" title="${CONFIG.SCORE_LABELS[f]}">${CONFIG.SCORE_LABELS[f].split(' ')[0]}</th>`).join('');
+    const tableOf=(list,label,dotColor)=>!list.length?'':`
+      <div class="classes-section-header"><span>${label}</span><span class="classes-section-cnt">${list.length}</span></div>
+      <div class="card" style="overflow:hidden;margin-bottom:16px"><div style="overflow-x:auto"><table class="table">
+        <thead><tr style="border-bottom:2px solid ${dotColor}30"><th>Alumno</th>${sHdrs}<th class="tc">Prom.</th></tr></thead>
+        <tbody>${list.map(e=>{
+          const pp=pmap[e.personId]||{};const sc=e.scores||{};const avg=H.calcAverage(sc);
+          const sch=CONFIG.SCORE_FIELDS.map(f=>{
+            const v=sc[f];if(v===''||v===null||v===undefined)return`<td class="tc"><span style="color:var(--text-muted)">—</span></td>`;
+            const n=parseFloat(v),bg=n>=8?'#DCFCE7':n>=6?'#DBEAFE':'#FFE4E6',tx=n>=8?'#166534':n>=6?'#1D4ED8':'#9F1239';
+            return`<td class="tc"><span class="avg-badge" style="background:${bg};color:${tx}">${n.toFixed(1)}</span></td>`;
+          }).join('');
+          const avH=avg!==null?(()=>{const bg=avg>=8?'#DCFCE7':avg>=6?'#DBEAFE':'#FFE4E6',tx=avg>=8?'#166534':avg>=6?'#1D4ED8':'#9F1239';return`<span class="avg-badge" style="background:${bg};color:${tx};font-weight:800">${avg.toFixed(1)}</span>`;})():`<span style="color:var(--text-muted)">—</span>`;
+          return`<tr><td>${_pcell(pp,{...p,bar:dotColor})}</td>${sch}<td class="tc">${avH}</td></tr>`;
+        }).join('')||_emptyTr()}</tbody>
+      </table></div></div>`;
+
+    return hdr + tableOf(fApv,'🎓 Aprobados','#22C55E') + tableOf(fDes,'📉 Desaprobados','#F43F5E');
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // MODALES: INSCRIBIR
+  // ═══════════════════════════════════════════════════════════
+  async function openEnrollModal() {
+    const p = GRADE_PAL[_grade];
+    // FIX: pasar footer vacío en el open inicial para que exista el elemento .modal-footer
+    // Luego se reemplaza el innerHTML. Si no se pasa footer, el DOM no tiene .modal-footer
+    // y el querySelector devuelve null → los botones nunca aparecen.
+    Modal.open({
+      title:  `Inscribir en ${CONFIG.GRADES[_grade].label}`,
+      size:   'md',
+      body:   `<div class="modal-loading"><div class="spinner"></div><p>Cargando personas…</p></div>`,
+      footer: `<button class="btn btn-ghost" onclick="Modal.close()">Cancelar</button>
+               <button class="btn btn-primary" id="enr-ok" disabled
+                 style="background:${p.bar};border-color:${p.bar}"
+                 onclick="SchoolsModule._doEnroll()">${IC.add} Inscribir</button>`,
+    });
+    try {
+      const people  = await API.getPeople();
+      const enrolled= new Set((_d.enrollments[_grade]||[]).filter(_act).map(e=>e.personId));
+      window._S_avail = H.sortBy(people.filter(pp=>!enrolled.has(pp.id)),'name');
+      window._S_selId = null;
+
+      Modal.setBody(`
+        <p style="font-size:13px;color:var(--text-muted);margin-bottom:14px">
+          Seleccioná la persona a inscribir en <strong>${CONFIG.GRADES[_grade].label}</strong>.
+        </p>
+        <div class="search-input-wrap" style="max-width:100%;margin-bottom:10px">
+          <span class="search-input-icon">${IC.search}</span>
+          <input class="search-input" id="enr-sq" placeholder="Buscar persona…"
+            oninput="SchoolsModule._enrFilter(this.value)" autofocus>
+        </div>
+        <div id="enr-list" style="max-height:300px;overflow-y:auto;border:1.5px solid var(--border-soft);border-radius:10px">
+          ${_enrList(window._S_avail, p)}
+        </div>
+        <div id="enr-selected" style="display:none;margin-top:10px;padding:10px 14px;background:${p.bg};border:1.5px solid ${p.bar}40;border-radius:10px;font-size:13px;font-weight:600;color:${p.text}"></div>
+        <div id="enr-msg" style="margin-top:8px"></div>`);
+
+    } catch(e) {
+      Modal.setBody(`<div class="form-msg form-msg-error">${H.escape(e.message)}</div>`);
+    }
+  }
+
+  function _enrList(people, p) {
+    if(!people.length) return `<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px">Sin personas disponibles</div>`;
+    return people.slice(0,60).map(pp => `
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border-soft);transition:background .12s"
+        class="enr-row" data-id="${pp.id}" data-name="${H.esc(`${pp.name||''} ${pp.lastName||''}`)}"
+        onclick="SchoolsModule._enrSel('${pp.id}','${H.esc(`${pp.name||''} ${pp.lastName||''}`)}')">
+        <div class="avatar" style="width:32px;height:32px;font-size:11px;background:${(p||GRADE_PAL.escuelaVida).bar}18;color:${(p||GRADE_PAL.escuelaVida).text}">
+          ${H.initials(`${pp.name||''} ${pp.lastName||''}`)}
+        </div>
+        <div style="flex:1;min-width:0">
+          <div class="person-name-text" style="font-size:13px">${H.escape(pp.name||'')} ${H.escape(pp.lastName||'')}</div>
+          <div class="person-country-text">${H.escape(pp.phone||pp.email||'')}</div>
+        </div>
+      </div>`).join('');
+  }
+
+  function _enrFilter(q) {
+    const p   = GRADE_PAL[_grade];
+    const flt = H.filterBySearch(window._S_avail||[], q, ['name','lastName','phone','email']);
+    const el  = document.getElementById('enr-list');
+    if (el) el.innerHTML = _enrList(flt, p);
+  }
+
+  function _enrSel(id, name) {
+    window._S_selId = id;
+    // Highlight selected row
+    document.querySelectorAll('.enr-row').forEach(r => {
+      r.style.background = r.dataset.id === id ? `${GRADE_PAL[_grade].bg}` : '';
+      r.style.borderLeft = r.dataset.id === id ? `3px solid ${GRADE_PAL[_grade].bar}` : '';
+    });
+    // Mostrar nombre seleccionado
+    const sel = document.getElementById('enr-selected');
+    if (sel) { sel.style.display='block'; sel.textContent=`✓ Seleccionado: ${name}`; }
+    // Habilitar botón
+    const btn = document.getElementById('enr-ok');
+    if (btn) btn.disabled = false;
+  }
+
+  async function _doEnroll() {
+    if (!window._S_selId) return;
+    const btn = document.getElementById('enr-ok');
+    if (btn) { btn.disabled=true; btn.textContent='Inscribiendo…'; }
+    try {
+      await API.enrollPerson(window._S_selId, _grade);
+      Modal.close(); Toast.success('Alumno inscripto');
+      _evict(); await _fetch(_grade, true); _go('students');
+    } catch(e) {
+      const m=document.getElementById('enr-msg');
+      if(m) m.innerHTML=`<div class="form-msg form-msg-error">${H.escape(e.message)}</div>`;
+      if(btn) { btn.disabled=false; btn.innerHTML=`${IC.add} Inscribir`; }
+    }
+  }
+
+  // MODAL: BAJA
+  function openBajaModal(eid, nm) {
+    const opts=CONFIG.DROP_REASONS.map(r=>`<option value="${r.value}">${r.label}</option>`).join('');
+    Modal.open({title:`Dar de baja — ${nm}`,size:'sm',body:`
+      <p style="font-size:13px;color:var(--text-muted);margin-bottom:14px">El alumno queda con estado "Baja". Sus datos académicos se conservan.</p>
+      <div class="form-group"><label class="form-label">Motivo *</label>
+        <select class="form-select" id="bm">${'<option value="">Seleccioná…</option>'+opts}</select></div>
+      <div class="form-group"><label class="form-label">Detalle (opcional)</label>
+        <textarea class="form-textarea" id="bd" placeholder="Info adicional…"></textarea></div>
+      <div id="baja-msg"></div>`,
+      footer:`<button class="btn btn-ghost" onclick="Modal.close()">Cancelar</button>
+              <button class="btn btn-danger" onclick="SchoolsModule._doBaja('${eid}')">Confirmar baja</button>`});
+  }
+  async function _doBaja(eid) {
+    const mot=(document.getElementById('bm')?.value||''),det=(document.getElementById('bd')?.value||'').trim(),mg=document.getElementById('baja-msg');
+    if(!mot){if(mg)mg.innerHTML=`<div class="form-msg form-msg-error">Seleccioná un motivo</div>`;return;}
+    const btn=document.querySelector('#modal-overlay .btn-danger');if(btn){btn.disabled=true;btn.textContent='Procesando…';}
+    try{await API.unenrollPerson(eid,mot,det);Modal.close();Toast.success('Alumno dado de baja');_evict(); await _fetch(_grade, true);_go('students');}
+    catch(e){if(mg)mg.innerHTML=`<div class="form-msg form-msg-error">${H.escape(e.message)}</div>`;if(btn){btn.disabled=false;btn.textContent='Confirmar baja';}}
+  }
+
+  // MODAL: EGRESO
+  function openEgresoModal(eid, nm) {
+    const p=GRADE_PAL[_grade];
+    Modal.open({title:`Egreso — ${nm}`,size:'sm',body:`
+      <div class="form-group"><label class="form-label">Resultado *</label>
+        <select class="form-select" id="egr-st">
+          <option value="aprobado">✓ Aprobado</option>
+          <option value="desaprobado">✗ Desaprobado</option>
+        </select>
+      </div><div id="egr-msg"></div>`,
+      footer:`<button class="btn btn-ghost" onclick="Modal.close()">Cancelar</button>
+              <button class="btn btn-primary" style="background:${p.bar};border-color:${p.bar}" onclick="SchoolsModule._doEgreso('${eid}')">Confirmar egreso</button>`});
+  }
+  async function _doEgreso(eid) {
+    const st=document.getElementById('egr-st')?.value||'aprobado',pid=_d.currentSemester?.id||'';
+    const btn=document.querySelector('#modal-overlay .btn-primary');if(btn){btn.disabled=true;btn.textContent='Procesando…';}
+    try{await API.setEnrollmentStatus(eid,st,pid);Modal.close();Toast.success(`Egresado: ${st}`);_evict(); await _fetch(_grade, true);_go('graduates');}
+    catch(e){const m=document.getElementById('egr-msg');if(m)m.innerHTML=`<div class="form-msg form-msg-error">${H.escape(e.message)}</div>`;if(btn){btn.disabled=false;btn.textContent='Confirmar egreso';}}
+  }
+
+  // MODAL: EGRESO MASIVO
+  function openBulkGraduate() {
+    const p=GRADE_PAL[_grade],enrs=(_d.enrollments[_grade]||[]).filter(_act),pmap=_pm();
+    const elig=enrs.filter(e=>H.isComplete(e.scores));
+    Modal.open({title:`Egreso masivo — ${CONFIG.GRADES[_grade].label}`,size:'lg',body:`
+      <div style="padding:12px 16px;border-radius:8px;background:${p.badge};border:1px solid ${p.bar}30;color:${p.bdTxt};font-size:13px;margin-bottom:16px">
+        ${G_ICON[_grade]} <strong>${elig.length}</strong> alumno(s) con notas completas serán egresados.
+      </div>
+      ${elig.length?`<div class="card" style="overflow:hidden;max-height:280px;overflow-y:auto">
+        <table class="table"><thead><tr><th>Alumno</th><th class="tc">Promedio</th><th class="tc">Resultado</th></tr></thead>
+        <tbody>${elig.map(e=>{const pp=pmap[e.personId]||{},avg=H.calcAverage(e.scores),pass=avg!==null&&avg>=6;
+          return`<tr><td>${_pcell(pp,p)}</td><td class="tc">${H.scoreBadgeHtml(avg)}</td>
+          <td class="tc"><span style="font-size:11px;padding:2px 8px;border-radius:20px;font-weight:600;background:${pass?'#DCFCE7':'#FFE4E6'};color:${pass?'#166534':'#9F1239'}">${pass?'Aprobado':'Desaprobado'}</span></td></tr>`;
+        }).join('')}</tbody></table>
+      </div>`:`<div class="form-msg form-msg-info">Sin alumnos con notas completas para egresar.</div>`}
+      <div id="bulk-msg" style="margin-top:12px"></div>`,
+      footer:`<button class="btn btn-ghost" onclick="Modal.close()">Cancelar</button>
+        ${elig.length?`<button class="btn btn-primary" style="background:${p.bar};border-color:${p.bar}" onclick="SchoolsModule._doBulk()">${IC.graduation} Egresar ${elig.length}</button>`:''}`});
+    window._bulkElig=elig;
+  }
+  async function _doBulk() {
+    const btn=document.querySelector('#modal-overlay .btn-primary');if(btn){btn.disabled=true;btn.textContent='Procesando…';}
+    try{const pid=_d.currentSemester?.id||'';
+      await Promise.all((window._bulkElig||[]).map(e=>{const avg=H.calcAverage(e.scores),st=avg!==null&&avg>=6?'aprobado':'desaprobado';return API.setEnrollmentStatus(e.enrollmentId,st,pid);}));
+      Modal.close();Toast.success('Egreso masivo completado');_evict(); await _fetch(_grade, true);_go('graduates');}
+    catch(e){const m=document.getElementById('bulk-msg');if(m)m.innerHTML=`<div class="form-msg form-msg-error">${H.escape(e.message)}</div>`;if(btn){btn.disabled=false;btn.textContent=`${IC.graduation} Egresar`;}}
+  }
+
+  // MODAL: CALIFICACIONES — FIX v5.3
+  async function openScoreModal(eid, nm) {
+    const p = GRADE_PAL[_grade];
+    const enr = _findEnr(eid);
+    const sc  = enr ? (enr.scores||{}) : {};
+    const norm = {};
+    CONFIG.SCORE_FIELDS.forEach(f => {
+      const v = sc[f];
+      norm[f] = (v===null||v===undefined||v==='') ? '' : String(parseFloat(v)===parseFloat(v)?parseFloat(v):v);
+    });
+    const avg  = H.calcAverage(norm);
+    const pass = avg!==null && avg>=CONFIG.PASSING_GRADE;
+
+    const flds = CONFIG.SCORE_FIELDS.map(f => `
+      <div class="form-group">
+        <label class="form-label">${CONFIG.SCORE_LABELS[f]}</label>
+        <input class="form-input" id="sc-${f}" type="number" min="0" max="10" step="0.1"
+          value="${norm[f]}" placeholder="0–10" oninput="SchoolsModule._scPrev()">
+      </div>`).join('');
+
+    Modal.open({
+      title:  `Calificaciones — ${nm}`,
+      size:   'md',
+      body: `
+        ${avg!==null?`<div class="sch-score-banner" style="background:${pass?'#F0FDF4':'#FFF1F2'};border:1px solid ${pass?'#BBF7D0':'#FECDD3'};color:${pass?'#166534':'#9F1239'}">
+          <span>Promedio actual:</span>
+          <strong style="font-size:22px;font-weight:800">${avg.toFixed(2)}</strong>
+          <span style="padding:3px 10px;border-radius:20px;border:1px solid;font-size:12px;font-weight:600;background:${pass?'#DCFCE7':'#FFE4E6'};color:${pass?'#166534':'#9F1239'};border-color:${pass?'#BBF7D0':'#FECDD3'}">${pass?'✓ Aprobado':'✗ Desaprobado'}</span>
+        </div>`:''}
+        <div id="sc-prev" style="margin:10px 0 6px;font-size:13px;color:var(--text-muted);min-height:20px"></div>
+        <div class="form-row form-row-2" style="margin-top:8px">${flds}</div>
+        <div id="sc-msg"></div>`,
+      footer: `
+        <button class="btn btn-ghost" onclick="Modal.close()">Cancelar</button>
+        <button class="btn btn-primary" style="background:${p.bar};border-color:${p.bar}"
+          onclick="SchoolsModule._doSaveScores('${eid}')">
+          Guardar calificaciones
+        </button>`,
+    });
+    setTimeout(()=>SchoolsModule._scPrev(),80);
+  }
+
+  function _scPrev() {
+    const vals={};
+    CONFIG.SCORE_FIELDS.forEach(f=>{const v=document.getElementById(`sc-${f}`)?.value;if(v!==''&&v!==undefined){const n=parseFloat(v);if(!isNaN(n))vals[f]=n;}});
+    const avg=H.calcAverage(vals),el=document.getElementById('sc-prev');if(!el)return;
+    if(avg===null){el.textContent='';return;}
+    const pass=avg>=CONFIG.PASSING_GRADE;
+    el.innerHTML=`Nuevo promedio: <strong style="color:${pass?'#166534':'#9F1239'}">${avg.toFixed(2)}</strong> — ${pass?'✓ Aprueba':'✗ Desaprueba'}`;
+  }
+
+  async function _doSaveScores(eid) {
+    const sd={};
+    CONFIG.SCORE_FIELDS.forEach(f=>{
+      const v=document.getElementById(`sc-${f}`)?.value;
+      if(v!==undefined&&v!==''){const n=parseFloat(v);if(!isNaN(n))sd[f]=Math.min(10,Math.max(0,n));}
+    });
+    const btn=document.querySelector('#modal-overlay .btn-primary');
+    if(btn){btn.disabled=true;btn.textContent='Guardando…';}
+    try{
+      await API.saveScores(eid,sd);
+      Modal.close();Toast.success('Calificaciones guardadas');
+      _evict(); await _fetch(_grade, true);_go('students');
+    }catch(e){
+      const m=document.getElementById('sc-msg');
+      if(m)m.innerHTML=`<div class="form-msg form-msg-error">${H.escape(e.message)}</div>`;
+      if(btn){btn.disabled=false;btn.textContent='Guardar calificaciones';}
+    }
+  }
+
+  // MODAL: ASISTENCIA BATCH
+  async function openAttPanel(clId, clTitle) {
+    const p   =GRADE_PAL[_grade];
+    const enrs=(_d.enrollments[_grade]||[]).filter(_act);
+    const pmap=_pm();
+    Modal.open({title:`Asistencia — ${clTitle}`,size:'xl',
+      body:`<div class="modal-loading"><div class="spinner"></div><p>Cargando…</p></div>`});
+    const existing=await API.getAttendance(clId).catch(()=>[]);
+    const amap={};existing.forEach(a=>{amap[a.enrollmentId]=a.type;});
+
+    Modal.setBody(`
+      <div class="att-bulk-bar-v2">
+        <span class="att-bulk-label">Marcar todos como:</span>
+        ${CONFIG.ATTENDANCE_TYPES.map(t=>`<button class="att-bulk-pill"
+          style="background:${t.color==='green'?'#DCFCE7':t.color==='red'?'#FFE4E6':t.color==='amber'?'#FEF9C3':'#DBEAFE'};color:${t.color==='green'?'#166534':t.color==='red'?'#9F1239':t.color==='amber'?'#92400E':'#1D4ED8'};border-color:${t.color==='green'?'#BBF7D0':t.color==='red'?'#FECDD3':t.color==='amber'?'#FDE68A':'#BFDBFE'}"
+          onclick="SchoolsModule._markAll('${t.value}')">${t.label}</button>`).join('')}
+      </div>
+      <div class="att-students-list">
+        ${enrs.map(e=>{
+          const pp=pmap[e.personId]||{},curr=amap[e.enrollmentId]||'Presente',nm=`${pp.name||'?'} ${pp.lastName||''}`.trim();
+          const typeColors={Presente:{bg:'#DCFCE7',txt:'#166534'},Ausente:{bg:'#FFE4E6',txt:'#9F1239'},Justificado:{bg:'#FEF9C3',txt:'#92400E'},Tarde:{bg:'#DBEAFE',txt:'#1D4ED8'}};
+          return`<div class="att-student-row" style="border-left-color:${typeColors[curr]?.txt||p.bar}20">
+            <div class="att-student-info">
+              <div class="avatar" style="background:${p.bar}18;color:${p.text};width:34px;height:34px;font-size:12px">${H.initials(nm)}</div>
+              <div class="att-student-text">
+                <div class="att-student-name">${H.escape(pp.name||'?')} ${H.escape(pp.lastName||'')}</div>
+                <div class="att-student-sub">${H.escape(pp.phone||pp.email||'')}</div>
+              </div>
+            </div>
+            <div class="att-type-group">
+              ${CONFIG.ATTENDANCE_TYPES.map(t=>{const tc=typeColors[t.value]||{bg:'#F1F5F9',txt:'#64748B'};const isA=curr===t.value;return`<button class="att-type-btn-v2"
+                id="att-btn-${e.enrollmentId}-${t.value}"
+                style="background:${isA?tc.txt:'transparent'};color:${isA?'#fff':tc.txt};border:1.5px solid ${isA?tc.txt:tc.txt+'40'}"
+                onclick="SchoolsModule._setAttType('${e.enrollmentId}','${t.value}',this)">${t.label}</button>`;}).join('')}
+            </div>
+            <input class="att-reason-input" id="att-r-${e.enrollmentId}" placeholder="Motivo…">
+            <input type="hidden" id="att-t-${e.enrollmentId}" value="${curr}">
+          </div>`;
+        }).join('')}
+      </div>
+      <div id="att-msg" style="margin-top:12px"></div>`);
+
+    window._attClId=clId;window._attEnrs=enrs;
+    const modal=document.querySelector('#modal-overlay .modal');
+    if(modal&&!modal.querySelector('.modal-footer')){
+      const f=document.createElement('div');f.className='modal-footer';
+      f.innerHTML=`<button class="btn btn-ghost" onclick="Modal.close()">Cancelar</button>
+        <button class="btn btn-primary" style="background:${p.bar};border-color:${p.bar}" onclick="SchoolsModule._doAtt()">${IC.check} Guardar asistencia</button>`;
+      modal.appendChild(f);
+    }
+  }
+
+  function _setAttType(eid,type,btn) {
+    // Actualizar hidden input
+    const h=document.getElementById(`att-t-${eid}`);if(h)h.value=type;
+    // Actualizar estilos de botones del grupo
+    const types=['Presente','Ausente','Justificado','Tarde'];
+    const typeColors={Presente:{bg:'#DCFCE7',txt:'#166534'},Ausente:{bg:'#FFE4E6',txt:'#9F1239'},Justificado:{bg:'#FEF9C3',txt:'#92400E'},Tarde:{bg:'#DBEAFE',txt:'#1D4ED8'}};
+    types.forEach(t=>{
+      const b=document.getElementById(`att-btn-${eid}-${t}`);if(!b)return;
+      const tc=typeColors[t]||{txt:'#64748B'};const isA=t===type;
+      b.style.background=isA?tc.txt:'transparent';b.style.color=isA?'#fff':tc.txt;b.style.borderColor=isA?tc.txt:tc.txt+'40';
+    });
+  }
+
+  function _markAll(type) {
+    const typeColors={Presente:{bg:'#DCFCE7',txt:'#166534'},Ausente:{bg:'#FFE4E6',txt:'#9F1239'},Justificado:{bg:'#FEF9C3',txt:'#92400E'},Tarde:{bg:'#DBEAFE',txt:'#1D4ED8'}};
+    (window._attEnrs||[]).forEach(e=>_setAttType(e.enrollmentId,type,null));
+  }
+
+  async function _doAtt() {
+    const recs=(window._attEnrs||[]).map(e=>({
+      personId:e.personId,enrollmentId:e.enrollmentId,
+      type:document.getElementById(`att-t-${e.enrollmentId}`)?.value||'Presente',
+      reason:(document.getElementById(`att-r-${e.enrollmentId}`)?.value||'').trim()
+    }));
+    const btn=document.querySelector('#modal-overlay .btn-primary');if(btn){btn.disabled=true;btn.textContent='Guardando…';}
+    try{await API.saveAttendanceBatch(window._attClId,recs);Modal.close();Toast.success(`Asistencia guardada — ${recs.length} registros`);_evict(); await _fetch(_grade, true);_go('classes');}
+    catch(e){const m=document.getElementById('att-msg');if(m)m.innerHTML=`<div class="form-msg form-msg-error">${H.escape(e.message)}</div>`;if(btn){btn.disabled=false;btn.innerHTML=`${IC.check} Guardar`;}}
+  }
+
+  // MODAL: CLASE
+  function openClassModal(cls) {
+    const p=GRADE_PAL[_grade],isEdit=!!(cls&&cls.id);
+    Modal.open({title:isEdit?'Editar clase':'Nueva clase',size:'md',body:`
+      <div class="form-group"><label class="form-label">Título *</label>
+        <input class="form-input" id="cls-ti" value="${H.escape(cls?.title||'')}" placeholder="Ej: Clase 1 — Introducción"></div>
+      <div class="form-row form-row-2">
+        <div class="form-group"><label class="form-label">Fecha *</label>
+          <input class="form-input" id="cls-dt" type="date" value="${H.escape(cls?.scheduledDate||'')}"></div>
+        <div class="form-group"><label class="form-label">Estado</label>
+          <select class="form-select" id="cls-st">
+            <option value="programada" ${(!cls||cls.status==='programada')?'selected':''}>Programada</option>
+            <option value="realizada"  ${cls?.status==='realizada'?'selected':''}>Realizada</option>
+            <option value="cancelada"  ${cls?.status==='cancelada'?'selected':''}>Cancelada</option>
+          </select></div>
+      </div>
+      <div class="form-group"><label class="form-label">Descripción</label>
+        <textarea class="form-textarea" id="cls-de">${H.escape(cls?.description||'')}</textarea></div>
+      <div id="cls-msg"></div>`,
+      footer:`<button class="btn btn-ghost" onclick="Modal.close()">Cancelar</button>
+              <button class="btn btn-primary" style="background:${p.bar};border-color:${p.bar}"
+                onclick="SchoolsModule._doSaveCls('${cls?.id||''}')">${isEdit?'Guardar':'Crear clase'}</button>`});
+  }
+  async function _doSaveCls(id) {
+    const data={grade:_grade,title:(document.getElementById('cls-ti')?.value||'').trim(),scheduledDate:document.getElementById('cls-dt')?.value||'',status:document.getElementById('cls-st')?.value||'programada',description:(document.getElementById('cls-de')?.value||'').trim()};
+    if(id)data.id=id;
+    const msg=document.getElementById('cls-msg');
+    if(!data.title||!data.scheduledDate){if(msg)msg.innerHTML=`<div class="form-msg form-msg-error">Título y fecha son requeridos</div>`;return;}
+    const btn=document.querySelector('#modal-overlay .btn-primary');if(btn){btn.disabled=true;btn.textContent='Guardando…';}
+    try{await API.saveClass(data);Modal.close();Toast.success(id?'Clase actualizada':'Clase creada');_evict(); await _fetch(_grade, true);_go('classes');}
+    catch(e){if(msg)msg.innerHTML=`<div class="form-msg form-msg-error">${H.escape(e.message)}</div>`;if(btn){btn.disabled=false;btn.textContent=id?'Guardar':'Crear clase';}}
+  }
+  async function delClass(id,title) {
+    const ok=await Modal.confirm({title:'Eliminar clase',message:`¿Eliminar <strong>${H.escape(title)}</strong>? Se elimina también la asistencia y cuestionarios.`,confirmText:'Eliminar'});
+    if(!ok)return;
+    try{await API.deleteClass(id);Toast.success('Clase eliminada');_evict(); await _fetch(_grade, true);_go('classes');}catch(e){Toast.error(e.message);}
+  }
+
+  // ── HELPERS ──────────────────────────────────────────────────
+  function _pm(){const m={};(_d.people||[]).forEach(p=>{if(p.id)m[p.id]=p;if(p.personId)m[p.personId]=p;});return m;}
+  function _act(e){return['activo','active'].includes((e.status||'').toLowerCase());}
+  function _findEnr(eid){return Object.values(_d.enrollments||{}).flat().find(e=>e.enrollmentId===eid||e.id===eid)||null;}
+  function _attpct(eid){const att=(_d.attendance||[]).filter(a=>a.enrollmentId===eid);if(!att.length)return 0;return Math.round(att.filter(a=>['Presente','Justificado','Tarde'].includes(a.type)).length/att.length*100);}
+  function _m(txt,q){return txt.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').includes(q.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,''));}
+  function _pcell(pp,p){const nm=`${pp.name||'?'} ${pp.lastName||''}`.trim();return`<div class="person-name-cell"><div class="avatar" style="background:${p.bar}22;color:${p.text};width:32px;height:32px;font-size:11px">${pp.photoUrl?`<img src="${H.escape(pp.photoUrl)}" alt="">`:H.initials(nm)}</div><div><div class="person-name-text">${H.escape(pp.name||'?')} ${H.escape(pp.lastName||'')}</div><div class="person-country-text">${H.escape(pp.phone||pp.email||'')}</div></div></div>`;}
+  function _searchBox(key,ph,fn){return`<div class="search-input-wrap" style="max-width:240px"><span class="search-input-icon">${IC.search}</span><input class="search-input" value="${H.escape(_srch[key]||'')}" placeholder="${ph}" oninput="${fn}(this.value)"><button class="search-clear-btn ${_srch[key]?'visible':''}" onclick="${fn}('')">×</button></div>`;}
+  function _emptyTr(){return`<tr><td colspan="20" style="text-align:center;padding:24px;color:var(--text-muted);font-size:13px">Sin resultados</td></tr>`;}
+  function spin(){return`<div class="sect-loading"><div class="spinner"></div></div>`;}
+  function _err(msg){return`<div style="padding:48px 24px;text-align:center"><div style="font-size:32px;margin-bottom:12px;opacity:.4">${IC.alert}</div><div style="font-size:14px;color:var(--red-600);margin-bottom:16px">${H.escape(msg||'Error')}</div><button class="btn btn-ghost btn-sm" onclick="SchoolsModule.render()">${IC.refresh} Reintentar</button></div>`;}
+
+  // Búsquedas por módulo
+  function _srchStudents(q){_srch.students=q;const c=document.getElementById('sch-c');if(c&&_mod==='students')c.innerHTML=_modStudents();}
+  function _srchClasses(q){_srch.classes=q;const c=document.getElementById('sch-c');if(c&&_mod==='classes')c.innerHTML=_modClasses();}
+  function _srchBajas(q){_srch.bajas=q;const c=document.getElementById('sch-c');if(c&&_mod==='bajas')c.innerHTML=_modBajas();}
+  function _srchGraduates(q){_srch.graduates=q;const c=document.getElementById('sch-c');if(c&&_mod==='graduates')c.innerHTML=_modGraduates();}
+
+  function _expStudents(){
+    const pmap=_pm(),enrs=(_d.enrollments[_grade]||[]).filter(_act);
+    H.downloadCSV(enrs.map(e=>{const pp=pmap[e.personId]||{},sc=e.scores||{};return{nombre:`${pp.name||''} ${pp.lastName||''}`.trim(),email:pp.email||'',telefono:pp.phone||'',...Object.fromEntries(CONFIG.SCORE_FIELDS.map(f=>[CONFIG.SCORE_LABELS[f],sc[f]||''])),promedio:H.calcAverage(sc)??''};}),
+    [{field:'nombre',label:'Nombre'},{field:'email',label:'Email'},{field:'telefono',label:'Tel'},...CONFIG.SCORE_FIELDS.map(f=>({field:CONFIG.SCORE_LABELS[f],label:CONFIG.SCORE_LABELS[f]})),{field:'promedio',label:'Promedio'}],
+    `${_grade}.csv`);
+  }
+
+  // ── retorno público ─────────────────────────────
+
+  return {
+    render, switchGrade, _go,
+    openEnrollModal, _enrFilter, _enrSel, _doEnroll,
+    openBajaModal, _doBaja,
+    openEgresoModal, _doEgreso,
+    openBulkGraduate, _doBulk,
+    openScoreModal, _scPrev, _doSaveScores,
+    openQuestModal, _qAdd, _qAssignAll, _qSubmit, _qDel,
+    _qSubmitM, _qDelM, _refreshQuests,
+    openAttPanel, _setAttType, _markAll, _doAtt,
+    openClassModal, _doSaveCls, delClass,
+    _srchStudents, _srchClasses, _srchBajas, _srchGraduates,
+    _expStudents,
+  };
+})();
+</script>
+
+<style>
+/* ── Hero compacto de Escuelas ──────────────────────────────── */
+.sch-hero-compact {
+  position: relative;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-soft);
+  overflow: hidden;
+  margin-bottom: 0;
+}
+.sch-hero-band2 {
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 4px;
+}
+.sch-hero-compact-body {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 16px 24px 16px 32px;
+  flex-wrap: wrap;
+}
+.sch-hero-compact-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+.sch-hero-compact-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  border: 1.5px solid;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  flex-shrink: 0;
+  transition: all .2s;
+}
+.sch-hero-compact-eyebrow {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+.sch-hero-compact-title {
+  font-family: 'Playfair Display', serif;
+  font-size: 18px;
+  font-weight: 800;
+  color: var(--text-primary);
+  line-height: 1.2;
+  white-space: nowrap;
+  transition: all .2s;
+}
+
+/* Schools section wrapper */
+.schools-wrap { display:flex; flex-direction:column; gap:0; }
+
+/* Grade pill ajuste para pills de módulos (sin count) */
+.grade-pill [data-mod] .grade-pill-cnt { display:none; }
+
+/* Schools content area — sin sidebar */
+.schools-content { display:flex; flex-direction:column; gap:16px; min-width:0; }
+
+/* Tabla utils */
+.tc { text-align:center }
+.tr { text-align:right }
+.tbl-acts { display:flex; gap:4px; justify-content:flex-end }
+.enr-row:hover { background:var(--bg-subtle) }
+
+/* Score banner en modal */
+.sch-score-banner { display:flex; align-items:center; gap:12px; padding:12px 16px; border-radius:var(--radius-sm); font-size:14px; font-weight:600; margin-bottom:4px; }
+
+/* Spinner en contenido */
+.sect-loading { display:flex; justify-content:center; align-items:center; min-height:160px; }
+
+/* Responsive */
+@media(max-width:768px) {
+  .sch-hero-compact-body { padding:12px 16px 12px 24px; gap:12px; }
+  .sch-hero-compact-title { font-size:15px; }
+  .schools-grade-bar { flex-wrap:wrap; }
+}
+</style>

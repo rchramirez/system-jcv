@@ -1,0 +1,3121 @@
+<script>
+// ============================================================
+// JCV FRONTEND — App.Modules.html  v5.0
+//
+// Módulos de entidades. Cada módulo es un objeto con:
+//   render(params)  — dibuja la sección en #sect-X
+//   _load()         — fetcha datos y actualiza el Store
+//   _renderTable()  — genera el HTML de la tabla/lista
+//
+// Módulos:
+//   DashboardModule  — panel de estadísticas admin
+//   PeopleModule     — Personas (tabla, modal CRUD, foto)
+//   CellsModule      — Células (tabla, modal, miembros)
+//   ChurchesModule   — Nexos (tabla, modal CRUD)
+//   MinistriesModule — Ministerios (tabla, modal, miembros)
+//   UsersModule      — Usuarios (tabla, modal, activar/desactivar)
+//   AuditModule      — Log de auditoría (tabla filtrable + paginada)
+//   ConfigModule     — Configuración (períodos, cache, perfil)
+//
+// Dependencias cargadas antes:
+//   App.Constants, App.State, App.Bridge, App.Shell
+// ============================================================
+
+// ═══════════════════════════════════════════════════════════
+// DASHBOARD MODULE
+// ═══════════════════════════════════════════════════════════
+const DashboardModule = (() => {
+
+  async function render() {
+    const el = document.getElementById('sect-dashboard');
+    if (!el) return;
+    // Guard: si no hay usuario en Store todavía, reintentar en 300ms
+    if (!APP.user) {
+      el.innerHTML = `<div class="sect-loading"><div class="spinner"></div></div>`;
+      setTimeout(() => render(), 300);
+      return;
+    }
+    el.innerHTML = `<div class="sect-loading"><div class="spinner"></div></div>`;
+    try {
+      const stats = await API.getDashboardStats();
+      const secDash = APP.user && APP.user.role !== 'admin'
+        ? await API.getSecretaryDashboard(APP.user.assignedGrade || '')
+        : null;
+      el.innerHTML = _renderDashboard(stats, secDash);
+    } catch (e) {
+      el.innerHTML = _renderError(e.message);
+    }
+  }
+
+  function _renderDashboard(stats, secDash) {
+    const g = stats.gradeStats || {};
+    const gradeCards = CONFIG.GRADE_KEYS.map(key => {
+      const d = g[key] || {};
+      return `
+        <div class="dash-grade-card" onclick="Router.go('schools',{grade:'${key}'})">
+          <div class="dash-grade-header">
+            <span class="badge badge-${CONFIG.GRADES[key].color}">${CONFIG.GRADES[key].short}</span>
+            <span class="dash-grade-label">${CONFIG.GRADES[key].label}</span>
+          </div>
+          <div class="dash-grade-stats">
+            <div class="dash-stat">
+              <div class="dash-stat-val">${d.total || 0}</div>
+              <div class="dash-stat-lbl">Inscriptos</div>
+            </div>
+            <div class="dash-stat">
+              <div class="dash-stat-val text-green">${d.approved || 0}</div>
+              <div class="dash-stat-lbl">Aprobados</div>
+            </div>
+            <div class="dash-stat">
+              <div class="dash-stat-val">${d.classes || 0}</div>
+              <div class="dash-stat-lbl">Clases</div>
+            </div>
+          </div>
+        </div>`;
+    }).join('');
+
+    const kpis = [
+      { label: 'Personas', val: stats.totalPeople   || 0, icon: IC.people,   section: 'people'     },
+      { label: 'Inscriptos',val: stats.totalEnrolled|| 0, icon: IC.schools,  section: 'schools'    },
+      { label: 'Células',   val: stats.totalCells   || 0, icon: IC.cells,    section: 'cells'      },
+      { label: 'Nexos',     val: stats.totalChurches|| 0, icon: IC.churches, section: 'churches'   },
+    ];
+    const kpiHtml = kpis.map(k => `
+      <div class="dash-kpi" onclick="Router.go('${k.section}')">
+        <div class="dash-kpi-icon">${k.icon}</div>
+        <div class="dash-kpi-val">${k.val.toLocaleString('es-AR')}</div>
+        <div class="dash-kpi-lbl">${k.label}</div>
+      </div>`).join('');
+
+    // Panel secretario
+    let secHtml = '';
+    if (secDash) {
+      const risks = (secDash.activeStudents || []).filter(s => s.riskLevel !== 'ok').slice(0, 5);
+      const bdays = (secDash.birthdays || []).slice(0, 5);
+      secHtml = `
+        <div class="dash-row">
+          ${risks.length ? `
+          <div class="dash-card">
+            <div class="dash-card-title">${IC.warning} Alumnos en riesgo</div>
+            ${risks.map(s => `
+              <div class="dash-risk-row">
+                <div class="person-cell">
+                  <div class="person-avatar">${s.photoUrl ? `<img src="${s.photoUrl}">` : H.initials(`${s.name} ${s.lastName}`)}</div>
+                  <div><div class="person-name">${H.escape(s.name)} ${H.escape(s.lastName)}</div>
+                  <div class="person-sub">${H.gradeLabel(s.grade)}</div></div>
+                </div>
+                <span class="badge ${H.statusBadge(s.riskLevel)}">${s.ausentes} ausencias</span>
+              </div>`).join('')}
+          </div>` : ''}
+          ${bdays.length ? `
+          <div class="dash-card">
+            <div class="dash-card-title">${IC.cake} Cumpleaños del mes</div>
+            ${bdays.map(b => `
+              <div class="dash-risk-row">
+                <div class="person-cell">
+                  <div class="person-avatar">${b.photoUrl ? `<img src="${b.photoUrl}">` : H.initials(`${b.name} ${b.lastName}`)}</div>
+                  <div><div class="person-name">${H.escape(b.name)} ${H.escape(b.lastName)}</div>
+                  <div class="person-sub">Día ${b.day} · ${b.age} años</div></div>
+                </div>
+              </div>`).join('')}
+          </div>` : ''}
+        </div>`;
+    }
+
+    return `
+      <div class="sect-hero">
+        <div class="sect-hero-left">
+          <div class="sect-hero-icon">${IC.dashboard}</div>
+          <div class="sect-hero-text">
+            <div class="sect-hero-eyebrow">Panel principal</div>
+            <div class="sect-hero-title">Dashboard</div>
+            <div class="sect-hero-sub">Resumen general del sistema</div>
+          </div>
+        </div>
+      </div>
+      <div class="dash-body">
+        <div class="dash-kpis">${kpiHtml}</div>
+        <div class="dash-grades-title">Escuelas</div>
+        <div class="dash-grades">${gradeCards}</div>
+        ${secHtml}
+      </div>`;
+  }
+
+  return { render };
+})();
+
+// ═══════════════════════════════════════════════════════════
+// PEOPLE MODULE
+// ═══════════════════════════════════════════════════════════
+const PeopleModule = (() => {
+  let _all = [], _filtered = [], _page = 1;
+  const PAGE = 50;
+
+  async function render() {
+    const el = document.getElementById('sect-people');
+    if (!el) return;
+    if (!APP.user) {
+      el.innerHTML = `<div class="sect-loading"><div class="spinner"></div></div>`;
+      setTimeout(() => render(), 300);
+      return;
+    }
+    el.innerHTML = `<div class="sect-loading"><div class="spinner"></div></div>`;
+    try {
+      // Fetch paralelo: personas + datos relacionados
+      // getCells/getMinistries/getEnrollments ya guardan en Store y CacheMgr
+      const [people] = await Promise.all([
+        API.getPeople(),
+        API.getCells(),
+        API.getMinistries(),
+        API.getEnrollments(),
+      ]);
+      _all      = people;
+      _filtered = [..._all];
+      _page     = 1;
+      el.innerHTML = _buildShell();
+      _bindEvents(el);
+      _renderTable();
+    } catch (e) { el.innerHTML = _renderError(e.message); }
+  }
+
+  function _buildShell() {
+    const canEdit = ['admin','secretary'].includes(APP.user?.role);
+    return `
+      <div class="sect-hero">
+        <div class="sect-hero-left">
+          <div class="sect-hero-icon">${IC.people}</div>
+          <div class="sect-hero-text">
+            <div class="sect-hero-eyebrow">Gestión</div>
+            <div class="sect-hero-title">Personas</div>
+            <div class="sect-hero-sub">Registro de la congregación</div>
+          </div>
+        </div>
+        <div class="sect-hero-right">
+          <div class="sect-metric">
+            <div class="sect-metric-val" id="ppl-total">${_all.length}</div>
+            <div class="sect-metric-label">Total</div>
+          </div>
+          ${canEdit ? `<button class="btn btn-primary" onclick="PeopleModule.openModal()">${IC.add} Nueva persona</button>` : ''}
+        </div>
+      </div>
+      <div class="sect-toolbar">
+        <div class="search-wrap">
+          ${IC.search}
+          <input class="search-input" id="ppl-search" placeholder="Buscar por nombre, email, teléfono…" oninput="PeopleModule._onSearch(this.value)">
+        </div>
+        <button class="btn btn-ghost btn-sm" onclick="PeopleModule._export()">${IC.download} Exportar</button>
+      </div>
+      <div id="ppl-table"></div>
+      <div id="ppl-pagination"></div>`;
+  }
+
+  function _bindEvents(el) {
+    el.querySelector('#ppl-search')?.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { e.target.value = ''; PeopleModule._onSearch(''); }
+    });
+  }
+
+  function _onSearch(q) {
+    Store.patch('search', { people: q });
+    _filtered = H.filterBySearch(_all, q, ['name','lastName','email','phone','cellLeader','country']);
+    _page = 1;
+    _renderTable();
+    const tot = document.getElementById('ppl-total');
+    if (tot) tot.textContent = _filtered.length;
+  }
+
+  function _renderTable() {
+    const tableEl = document.getElementById('ppl-table');
+    const pagEl   = document.getElementById('ppl-pagination');
+    if (!tableEl) return;
+
+    const pag     = H.paginate(_filtered, _page, PAGE);
+    const rows    = pag.rows;
+    const canEdit = ['admin','secretary'].includes(APP.user?.role);
+    const isAdmin = APP.user?.role === 'admin';
+
+    // Datos relacionados desde Store/caché
+    const cells      = Store.get('cells')      || [];
+    const ministries = Store.get('ministries') || [];
+    const enrollments= Store.get('enrollments')|| {};
+
+    tableEl.innerHTML = rows.length ? `
+      <div class="table-wrap">
+        <div class="table-scroll">
+          <table class="table ppl-table-v2">
+            <thead>
+              <tr>
+                <th style="min-width:200px">Persona</th>
+                <th style="min-width:160px">Contacto</th>
+                <th style="min-width:150px">Célula</th>
+                <th style="min-width:150px">Ministerio</th>
+                <th style="min-width:160px">Cursos</th>
+                <th style="text-align:center;min-width:90px">Acciones</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.map(p => _renderRow(p, canEdit, isAdmin, cells, ministries, enrollments)).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>` : `<div class="table-empty"><div class="table-empty-icon">${IC.people}</div>No se encontraron personas</div>`;
+
+    if (pagEl) pagEl.innerHTML = _renderPagination(pag, 'PeopleModule._goPage');
+  }
+
+  function _renderRow(p, canEdit, isAdmin, cells, ministries, enrollments) {
+    // ── Persona: edad + bandera + país
+    const initials = H.initials(H.fullName(p));
+    const avatar   = p.photoUrl
+      ? `<img src="${H.escape(p.photoUrl)}" alt="">`
+      : initials;
+
+    const age = _calcAge(p.birthDate);
+    const flag = _countryFlag(p.country);
+    const ageLine = [
+      age !== null ? `<span class="ppl-age">${age} años</span>` : '',
+      (age !== null && (flag || p.country)) ? `<span class="ppl-sep">·</span>` : '',
+      flag  ? `<span class="ppl-flag">${flag}</span>` : '',
+      p.country ? `<span class="ppl-country">${H.escape(p.country)}</span>` : '',
+    ].filter(Boolean).join('');
+
+    // ── Célula: nombre + líder
+    const cell = cells.find(c => c.id === p.cellId)
+              || cells.find(c => c.leader === p.cellLeader);
+    const cellHtml = cell
+      ? `<div>
+          <span class="ppl-chip ppl-chip-green">
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor"><polygon points="5,1 9,3 9,7 5,9 1,7 1,3"/></svg>
+            ${H.escape(cell.name)}
+          </span>
+          <div class="ppl-subline">
+            <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="5" r="3"/><path d="M2 14c0-3.3 2.7-5 6-5s6 1.7 6 5"/></svg>
+            ${H.escape(cell.leader || '—')}
+          </div>
+        </div>`
+      : `<span class="ppl-none">—</span>`;
+
+    // ── Ministerio: nombre + tipo con color
+    const ministry = ministries.find(m => m.id === p.ministryId);
+    const MTYPE_COLORS = {
+      alabanza:'#8B5CF6',ensenanza:'#3B82F6',ujieres:'#22C55E',
+      intercesion:'#D97706',evangelismo:'#EF4444',jovenes:'#06B6D4',
+      ninos:'#F97316',medios:'#EC4899',accion:'#78716C',otro:'#6366F1'
+    };
+    const MTYPE_ICONS = {
+      alabanza:'🎵',ensenanza:'📖',ujieres:'🤝',intercesion:'🙏',
+      evangelismo:'📢',jovenes:'⚡',ninos:'⭐',medios:'🎬',accion:'☕',otro:'✦'
+    };
+    const mColor = ministry ? (MTYPE_COLORS[ministry.type] || '#6366F1') : null;
+    const mIcon  = ministry ? (MTYPE_ICONS[ministry.type]  || '✦') : null;
+    const ministerioHtml = ministry
+      ? `<span class="ppl-chip" style="background:${mColor}18;color:${mColor};border-color:${mColor}30">
+          <span style="font-size:12px">${mIcon}</span>
+          ${H.escape(ministry.name)}
+        </span>`
+      : `<span class="ppl-none">—</span>`;
+
+    // ── Cursos: todos los grados activos con estado
+    const GRADE_KEYS  = CONFIG.GRADE_KEYS;
+    const GRADE_LABELS= {};
+    const GRADE_BG    = {escuelaVida:'#FEFCE8',consolidacion:'#F0FDF4',obreros1:'#FFF1F2',obreros2:'#EFF6FF'};
+    const GRADE_TEXT  = {escuelaVida:'#854D0E',consolidacion:'#166534',obreros1:'#9F1239',obreros2:'#1E40AF'};
+    CONFIG.GRADE_KEYS.forEach(k => { GRADE_LABELS[k] = CONFIG.GRADES[k].label; });
+
+    const STATUS_LABELS_MAP = {activo:'En curso',active:'En curso',aprobado:'Aprobado',approved:'Aprobado',desaprobado:'Desaprobado',failed:'Desaprobado',baja:'Baja',dropped:'Baja'};
+    const STATUS_BG  = {activo:'#DBEAFE',active:'#DBEAFE',aprobado:'#DCFCE7',approved:'#DCFCE7',desaprobado:'#FFE4E6',failed:'#FFE4E6',baja:'#F1F5F9',dropped:'#F1F5F9'};
+    const STATUS_TX  = {activo:'#1E40AF',active:'#1E40AF',aprobado:'#166534',approved:'#166534',desaprobado:'#9F1239',failed:'#9F1239',baja:'#64748B',dropped:'#64748B'};
+    const STATUS_DOT = {activo:'#3B82F6',active:'#3B82F6',aprobado:'#22C55E',approved:'#22C55E',desaprobado:'#F43F5E',failed:'#F43F5E',baja:'#94A3B8',dropped:'#94A3B8'};
+
+    const personGrades = GRADE_KEYS
+      .map(g => {
+        const list = Array.isArray(enrollments[g]) ? enrollments[g] : [];
+        return list.find(e => e.personId === p.id) ? { g, enr: list.find(e => e.personId === p.id) } : null;
+      })
+      .filter(Boolean);
+
+    const cursosHtml = personGrades.length
+      ? personGrades.map(({ g, enr }) => {
+          const st  = enr.status || 'activo';
+          const stL = STATUS_LABELS_MAP[st] || st;
+          const bg  = STATUS_BG[st]  || '#F1F5F9';
+          const tx  = STATUS_TX[st]  || '#64748B';
+          const dot = STATUS_DOT[st] || '#94A3B8';
+          return `<div class="ppl-course">
+            <span class="ppl-course-name" style="color:${GRADE_TEXT[g]}">${GRADE_LABELS[g]}</span>
+            <span class="ppl-status-chip" style="background:${bg};color:${tx}">
+              <span style="width:5px;height:5px;border-radius:50%;background:${dot};display:inline-block;flex-shrink:0"></span>
+              ${stL}
+            </span>
+          </div>`;
+        }).join('')
+      : `<span class="ppl-none">—</span>`;
+
+    // ── Acciones
+    const accionesHtml = `
+      <div class="ppl-acts">
+        <button class="ppl-btn ppl-btn-view" title="Ver perfil"
+          onclick="PeopleModule._viewPerson(${JSON.stringify(p)})">
+          ${IC.eye}
+        </button>
+        ${canEdit ? `
+        <button class="ppl-btn ppl-btn-edit" title="Editar"
+          onclick="PeopleModule.openModal(${JSON.stringify(p)})">
+          ${IC.edit}
+        </button>` : ''}
+        ${isAdmin ? `
+        <button class="ppl-btn ppl-btn-del" title="Eliminar"
+          onclick="PeopleModule.deletePerson('${p.id}','${H.escape(p.name)} ${H.escape(p.lastName||'')}')">
+          ${IC.trash}
+        </button>` : ''}
+      </div>`;
+
+    return `
+      <tr class="ppl-row">
+        <td>
+          <div class="ppl-cell" onclick="PeopleModule._viewPerson(${JSON.stringify(p)})">
+            <div class="ppl-av">${avatar}</div>
+            <div class="ppl-info">
+              <div class="ppl-name">${H.escape(p.name)} ${H.escape(p.lastName || '')}</div>
+              <div class="ppl-subline ppl-subline-gap">${ageLine}</div>
+            </div>
+          </div>
+        </td>
+        <td>
+          ${p.phone
+            ? `<div class="ppl-contact-main">
+                <svg class="ppl-ico" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M2 1.5h2.5L5.8 4.5l-1.3.8A7 7 0 009.2 9.5l.8-1.3 3 1.3V12a.8.8 0 01-.8.8C4.5 12.8 1.2 8 1.2 3a.8.8 0 01.8-.8"/></svg>
+                ${H.escape(p.phone)}
+              </div>`
+            : '<span class="ppl-none">—</span>'}
+          ${p.email
+            ? `<div class="ppl-contact-sub">
+                <svg class="ppl-ico" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><rect x="1" y="3" width="12" height="8" rx="1"/><path d="M1 4l6 4 6-4"/></svg>
+                ${H.escape(p.email)}
+              </div>`
+            : ''}
+        </td>
+        <td>${cellHtml}</td>
+        <td>${ministerioHtml}</td>
+        <td>${cursosHtml}</td>
+        <td style="text-align:center">${accionesHtml}</td>
+      </tr>`;
+  }
+
+  // Calcula edad desde birthDate (ISO, Date(), o dd/mm/yyyy)
+  function _calcAge(val) {
+    if (!val) return null;
+    let d;
+    const str = String(val).trim();
+    const gas = str.match(/^Date\((\d{4}),(\d{1,2}),(\d{1,2})\)$/);
+    if (gas) {
+      d = new Date(parseInt(gas[1]), parseInt(gas[2]), parseInt(gas[3]));
+    } else if (/^\d{2}\/\d{2}\/\d{4}$/.test(str)) {
+      const [dd, mm, yy] = str.split('/');
+      d = new Date(`${yy}-${mm}-${dd}T12:00:00`);
+    } else {
+      d = new Date(str.includes('T') ? str : str + 'T12:00:00');
+    }
+    if (!d || isNaN(d.getTime()) || d.getFullYear() < 1900) return null;
+    const today = new Date();
+    let age = today.getFullYear() - d.getFullYear();
+    const m = today.getMonth() - d.getMonth();
+    if (m < 0 || (m === 0 && today.getDate() < d.getDate())) age--;
+    return age >= 0 ? age : null;
+  }
+
+  // Retorna el emoji de bandera para un país
+  function _countryFlag(country) {
+    const FLAGS = {
+      'Argentina':'🇦🇷','Bolivia':'🇧🇴','Brasil':'🇧🇷','Chile':'🇨🇱',
+      'Colombia':'🇨🇴','Costa Rica':'🇨🇷','Cuba':'🇨🇺','Rep. Dominicana':'🇩🇴',
+      'Ecuador':'🇪🇨','El Salvador':'🇸🇻','Guatemala':'🇬🇹','Honduras':'🇭🇳',
+      'México':'🇲🇽','Nicaragua':'🇳🇮','Panamá':'🇵🇦','Paraguay':'🇵🇾',
+      'Perú':'🇵🇪','Puerto Rico':'🇵🇷','Uruguay':'🇺🇾','Venezuela':'🇻🇪',
+      'Estados Unidos':'🇺🇸','España':'🇪🇸','Italia':'🇮🇹','Portugal':'🇵🇹',
+      'Francia':'🇫🇷','Alemania':'🇩🇪','Reino Unido':'🇬🇧','Canadá':'🇨🇦',
+      'Japón':'🇯🇵','China':'🇨🇳','Israel':'🇮🇱','Haití':'🇭🇹',
+      'Nigeria':'🇳🇬','Sudáfrica':'🇿🇦'
+    };
+    return FLAGS[country] || '';
+  }
+
+  async function openModal(person) {
+    const cells    = await API.getCells().catch(() => []);
+    const churches = await API.getChurches().catch(() => []);
+    const isEdit   = !!(person && person.id);
+
+    const cellOpts     = cells.map(c => `<option value="${c.id}" ${person?.cellId === c.id ? 'selected' : ''}>${H.escape(c.name)} — ${H.escape(c.leader||'')}</option>`).join('');
+    const churchOpts   = churches.map(c => `<option value="${c.id}" ${person?.churchId === c.id ? 'selected' : ''}>${H.escape(c.name)}</option>`).join('');
+    const genderOpts   = CONFIG.GENDERS.map(g => `<option value="${g.value}" ${person?.gender === g.value ? 'selected' : ''}>${g.label}</option>`).join('');
+
+    Modal.open({
+      title: isEdit ? 'Editar persona' : 'Nueva persona',
+      size: 'lg',
+      body: `
+        <div class="form-row form-row-2">
+          <div class="form-group"><label class="form-label">Nombre *</label>
+            <input class="form-input" id="p-name" value="${H.escape(person?.name||'')}" placeholder="Nombre"></div>
+          <div class="form-group"><label class="form-label">Apellido *</label>
+            <input class="form-input" id="p-last" value="${H.escape(person?.lastName||'')}" placeholder="Apellido"></div>
+        </div>
+        <div class="form-row form-row-2">
+          <div class="form-group"><label class="form-label">Email</label>
+            <input class="form-input" id="p-email" type="email" value="${H.escape(person?.email||'')}" placeholder="email@ejemplo.com"></div>
+          <div class="form-group"><label class="form-label">Teléfono</label>
+            <input class="form-input" id="p-phone" value="${H.escape(person?.phone||'')}" placeholder="+54 11 1234-5678"></div>
+        </div>
+        <div class="form-row form-row-3">
+          <div class="form-group"><label class="form-label">Género</label>
+            <select class="form-select" id="p-gender"><option value="">—</option>${genderOpts}</select></div>
+          <div class="form-group"><label class="form-label">Fecha de nacimiento</label>
+            <input class="form-input" id="p-birth" type="date" value="${H.escape(person?.birthDate||'')}"></div>
+          <div class="form-group"><label class="form-label">País</label>
+            <input class="form-input" id="p-country" value="${H.escape(person?.country||'Argentina')}" placeholder="Argentina"></div>
+        </div>
+        <div class="form-row form-row-2">
+          <div class="form-group"><label class="form-label">Célula</label>
+            <select class="form-select" id="p-cell"><option value="">Sin célula</option>${cellOpts}</select></div>
+          <div class="form-group"><label class="form-label">Nexo / Iglesia</label>
+            <select class="form-select" id="p-church"><option value="">Sin nexo</option>${churchOpts}</select></div>
+        </div>
+        <div class="form-row form-row-2">
+          <div class="form-group"><label class="form-label">Invitado por</label>
+            <input class="form-input" id="p-invited" value="${H.escape(person?.invitedBy||'')}"></div>
+          <div class="form-group" style="justify-content:flex-end;padding-top:20px">
+            <label class="form-check">
+              <input type="checkbox" id="p-encounter" ${String(person?.attendedEncounter).toLowerCase()==='true' ? 'checked' : ''}>
+              Asistió al Encuentro
+            </label>
+          </div>
+        </div>
+        <div class="form-group"><label class="form-label">Observación</label>
+          <textarea class="form-textarea" id="p-obs" placeholder="Notas internas…">${H.escape(person?.observation||'')}</textarea></div>
+        <div id="p-msg"></div>`,
+      footer: `
+        <button class="btn btn-ghost" onclick="Modal.close()">Cancelar</button>
+        <button class="btn btn-primary" onclick="PeopleModule._submit('${person?.id||''}')">
+          ${isEdit ? 'Guardar cambios' : 'Crear persona'}
+        </button>`,
+    });
+  }
+
+  async function _submit(id) {
+    const data = {
+      name:              (document.getElementById('p-name')?.value||'').trim(),
+      lastName:          (document.getElementById('p-last')?.value||'').trim(),
+      email:             (document.getElementById('p-email')?.value||'').trim(),
+      phone:             (document.getElementById('p-phone')?.value||'').trim(),
+      gender:            document.getElementById('p-gender')?.value||'',
+      birthDate:         document.getElementById('p-birth')?.value||'',
+      country:           (document.getElementById('p-country')?.value||'').trim(),
+      cellId:            document.getElementById('p-cell')?.value||'',
+      churchId:          document.getElementById('p-church')?.value||'',
+      invitedBy:         (document.getElementById('p-invited')?.value||'').trim(),
+      attendedEncounter: document.getElementById('p-encounter')?.checked || false,
+      observation:       (document.getElementById('p-obs')?.value||'').trim(),
+    };
+    if (id) data.id = id;
+
+    const msgEl = document.getElementById('p-msg');
+    if (!data.name || !data.lastName) {
+      if (msgEl) msgEl.innerHTML = `<div class="form-msg form-msg-error">Nombre y apellido son requeridos</div>`;
+      return;
+    }
+
+    const btn = document.querySelector('#modal-overlay .btn-primary');
+    if (btn) { btn.disabled = true; btn.textContent = 'Guardando…'; }
+
+    try {
+      await API.savePerson(data);
+      Modal.close();
+      Toast.success(id ? 'Persona actualizada' : 'Persona creada');
+      await render();
+    } catch (e) {
+      if (msgEl) msgEl.innerHTML = `<div class="form-msg form-msg-error">${H.escape(e.message)}</div>`;
+      if (btn) { btn.disabled = false; btn.textContent = id ? 'Guardar cambios' : 'Crear persona'; }
+    }
+  }
+
+  async function deletePerson(id, name) {
+    const ok = await Modal.confirm({ title: 'Eliminar persona', message: `¿Eliminar a <strong>${H.escape(name)}</strong>? Esta acción no se puede deshacer.`, confirmText: 'Eliminar' });
+    if (!ok) return;
+    try {
+      await API.deletePerson(id);
+      Toast.success('Persona eliminada');
+      await render();
+    } catch (e) { Toast.error(e.message); }
+  }
+
+  function _export() {
+    H.downloadCSV(_filtered, [
+      { field: 'name',      label: 'Nombre'   },
+      { field: 'lastName',  label: 'Apellido' },
+      { field: 'email',     label: 'Email'    },
+      { field: 'phone',     label: 'Teléfono' },
+      { field: 'cellLeader',label: 'Célula'   },
+      { field: 'country',   label: 'País'     },
+    ], 'personas.csv');
+  }
+
+  function _goPage(p) { _page = p; _renderTable(); }
+
+  function _viewPerson(person) {
+    // Redirige al modal de vista — usa el openModal con modo lectura
+    // o simplemente abre el modal de edición si no hay vista separada
+    if (typeof Modal !== 'undefined') {
+      const enc = String(person.attendedEncounter).toLowerCase() === 'true';
+      Modal.open({
+        title: `${H.escape(person.name)} ${H.escape(person.lastName || '')}`,
+        size: 'md',
+        body: `
+          <div style="display:flex;align-items:center;gap:14px;padding:16px;background:var(--bg-subtle);border-radius:12px;margin-bottom:16px">
+            <div class="ppl-av" style="width:52px;height:52px;font-size:17px">
+              ${person.photoUrl ? `<img src="${H.escape(person.photoUrl)}" alt="">` : H.initials(H.fullName(person))}
+            </div>
+            <div>
+              <div style="font-size:16px;font-weight:700;color:var(--text-primary)">${H.escape(person.name)} ${H.escape(person.lastName||'')}</div>
+              <div style="font-size:12px;color:var(--text-muted);margin-top:2px">${H.escape(person.country||'')} ${_countryFlag(person.country)}</div>
+            </div>
+            <span class="badge ${enc?'badge-green':'badge-gray'}" style="margin-left:auto">${enc?'Con Encuentro':'Sin Encuentro'}</span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:13px">
+            ${[
+              ['Teléfono', person.phone],
+              ['Email',    person.email],
+              ['País',     person.country],
+              ['Género',   person.gender],
+            ].filter(([,v]) => v).map(([l,v]) =>
+              `<div style="padding:10px 12px;background:var(--bg-subtle);border-radius:9px">
+                <div style="font-size:10px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em">${l}</div>
+                <div style="margin-top:3px;font-weight:500;color:var(--text-primary)">${H.escape(String(v))}</div>
+              </div>`
+            ).join('')}
+          </div>
+          ${person.observation ? `<div style="margin-top:12px;padding:12px;background:var(--bg-subtle);border-radius:9px;font-size:13px;color:var(--text-secondary)">${H.escape(person.observation)}</div>` : ''}`,
+        footer: `<button class="btn btn-ghost" onclick="Modal.close()">Cerrar</button>`
+      });
+    }
+  }
+
+  return { render, openModal, _submit, deletePerson, _onSearch, _goPage, _export, _viewPerson };
+})();
+
+// ═══════════════════════════════════════════════════════════
+// CELLS MODULE — Vista de árbol v2
+// ═══════════════════════════════════════════════════════════
+const CellsModule = (() => {
+
+  let _all       = [];   // todas las células
+  let _people    = [];   // personas (para conteo de integrantes)
+  let _churches  = [];   // nexos (para mostrar nombre en card)
+  let _expanded  = {};   // estado expand/colapso por id
+  let _query     = '';   // búsqueda activa
+
+  // Paleta de colores por profundidad de nivel
+  const DEPTH = [
+    { accent:'#A855F7', bg:'#FAF5FF', text:'#7C3AED', border:'#E9D5FF' },
+    { accent:'#3B82F6', bg:'#EFF6FF', text:'#1D4ED8', border:'#BFDBFE' },
+    { accent:'#22C55E', bg:'#F0FDF4', text:'#15803D', border:'#BBF7D0' },
+    { accent:'#F59E0B', bg:'#FFFBEB', text:'#92400E', border:'#FDE68A' },
+  ];
+
+  const CAT_LABELS = {
+    general:        'General',
+    jovenes:        'Jóvenes',
+    matrimonios:    'Matrimonios',
+    adolescentes:   'Adolescentes',
+    ninos:          'Niños',
+    preadolescentes:'Preadolescentes',
+  };
+
+  // ── Carga de datos ──────────────────────────────────────
+
+  async function render() {
+    const sect = document.getElementById('sect-cells');
+    if (!sect) return;
+    sect.innerHTML = `<div class="sect-loading"><div class="spinner"></div></div>`;
+    try {
+      [_all, _people, _churches] = await Promise.all([
+        API.getCells(),
+        API.getPeople().catch(() => []),
+        API.getChurches().catch(() => []),
+      ]);
+      // Inicializar todos expandidos la primera vez
+      _all.forEach(c => {
+        if (_expanded[c.id] === undefined) _expanded[c.id] = true;
+      });
+      sect.innerHTML = '';
+      sect.appendChild(_buildPage());
+    } catch (e) {
+      sect.innerHTML = _renderError(e.message);
+    }
+  }
+
+  // ── Construcción del DOM principal ─────────────────────
+
+  function _buildPage() {
+    const isAdmin     = APP.user?.role === 'admin';
+    const rootCells   = _all.filter(c => !c.parentCellId || !_all.find(x => x.id === c.parentCellId));
+    const childrenMap = _buildChildrenMap();
+    const totalM      = new Set(_people.filter(p => p.cellId || p.cellLeader).map(p => p.id)).size;
+    const totalL      = new Set(_all.map(c => c.leader).filter(Boolean)).size;
+    const allExp      = _all.length > 0 && _all.every(c => _expanded[c.id] !== false);
+
+    const wrap = document.createElement('div');
+
+    // ── Hero
+    wrap.innerHTML = `
+      <div class="ctv2-hero">
+        <div class="ctv2-hero-band"></div>
+        <div class="ctv2-hero-body">
+          <div class="ctv2-hero-left">
+            <div class="ctv2-hero-icon">${IC.cells}</div>
+            <div>
+              <div class="ctv2-hero-eyebrow">Estructura de la iglesia</div>
+              <h1 class="ctv2-hero-title">Células</h1>
+            </div>
+          </div>
+          <div class="ctv2-hero-right">
+            <div class="ctv2-stats-row">
+              <div class="ctv2-stat"><span class="ctv2-stat-val" style="color:#A855F7">${_all.length}</span><span class="ctv2-stat-lbl">células</span></div>
+              <div class="ctv2-stat-sep"></div>
+              <div class="ctv2-stat"><span class="ctv2-stat-val" style="color:#22C55E">${totalM}</span><span class="ctv2-stat-lbl">integrantes</span></div>
+              <div class="ctv2-stat-sep"></div>
+              <div class="ctv2-stat"><span class="ctv2-stat-val" style="color:#F97316">${totalL}</span><span class="ctv2-stat-lbl">líderes</span></div>
+              <div class="ctv2-stat-sep"></div>
+              <div class="ctv2-stat"><span class="ctv2-stat-val" style="color:#3B82F6">${rootCells.length}</span><span class="ctv2-stat-lbl">raíces</span></div>
+            </div>
+            ${isAdmin ? `<button class="btn btn-primary ctv2-new-btn" id="ctv2-new-btn">＋ Nueva Célula</button>` : ''}
+          </div>
+        </div>
+      </div>`;
+
+    // ── Toolbar
+    const toolbar = document.createElement('div');
+    toolbar.className = 'ctv2-toolbar';
+
+    const searchWrap = document.createElement('div');
+    searchWrap.className = 'ctv2-search';
+    searchWrap.innerHTML = `<span class="ctv2-search-icon">${IC.search}</span>`;
+    const searchInput = document.createElement('input');
+    searchInput.className = 'ctv2-search-input';
+    searchInput.placeholder = 'Buscar célula o líder...';
+    searchInput.value = _query;
+    searchInput.addEventListener('input', e => {
+      _query = e.target.value.toLowerCase().trim();
+      _repaint(treeWrap, childrenMap);
+    });
+    searchWrap.appendChild(searchInput);
+
+    const toggleBtn = document.createElement('button');
+    toggleBtn.className = 'btn btn-ghost btn-sm';
+    toggleBtn.id = 'ctv2-toggle-all';
+    toggleBtn.style.whiteSpace = 'nowrap';
+    toggleBtn.textContent = allExp ? '⊟ Contraer todo' : '⊞ Expandir todo';
+    toggleBtn.addEventListener('click', () => {
+      const next = !_all.every(c => _expanded[c.id] !== false);
+      _all.forEach(c => { _expanded[c.id] = next; });
+      toggleBtn.textContent = next ? '⊟ Contraer todo' : '⊞ Expandir todo';
+      _repaint(treeWrap, childrenMap);
+    });
+
+    toolbar.appendChild(searchWrap);
+    toolbar.appendChild(toggleBtn);
+
+    // ── Árbol
+    const treeWrap = document.createElement('div');
+    treeWrap.className = 'ctv2-tree';
+
+    _repaint(treeWrap, childrenMap);
+
+    wrap.appendChild(toolbar);
+    wrap.appendChild(treeWrap);
+
+    // Wiring post-insert
+    wrap.querySelector('#ctv2-new-btn')?.addEventListener('click', () => openModal());
+
+    return wrap;
+  }
+
+  // ── Lógica del árbol ────────────────────────────────────
+
+  function _buildChildrenMap() {
+    const map = {};
+    _all.forEach(c => {
+      const pid = c.parentCellId;
+      if (pid && _all.find(x => x.id === pid)) {
+        if (!map[pid]) map[pid] = [];
+        map[pid].push(c);
+      }
+    });
+    return map;
+  }
+
+  function _countDirectMembers(cell) {
+    return _people.filter(p =>
+      p.cellId === cell.id ||
+      (!p.cellId && cell.leader && p.cellLeader === cell.leader)
+    );
+  }
+
+  function _countTotalMembers(cellId, childrenMap) {
+    const cell = _all.find(c => c.id === cellId);
+    if (!cell) return 0;
+    const direct = _countDirectMembers(cell).length;
+    const children = childrenMap[cellId] || [];
+    return children.reduce((sum, ch) => sum + _countTotalMembers(ch.id, childrenMap), direct);
+  }
+
+  function _repaint(container, childrenMap) {
+    container.innerHTML = '';
+    const q = _query;
+
+    // Si hay búsqueda, modo flat con todas las coincidencias
+    if (q) {
+      const matches = _all.filter(c =>
+        H.matches(c.name, q) || H.matches(c.leader, q) || H.matches(c.location, q)
+      );
+      if (!matches.length) {
+        container.innerHTML = `
+          <div class="table-empty">
+            <div class="table-empty-icon">${IC.cells}</div>
+            Sin resultados para "<strong>${H.escape(q)}</strong>"
+          </div>`;
+        return;
+      }
+      matches.forEach(cell => {
+        const depth = _getDepth(cell.id, childrenMap);
+        container.appendChild(_renderCard(cell, childrenMap, depth, false));
+      });
+      return;
+    }
+
+    // Modo árbol normal
+    const roots = _all.filter(c => !c.parentCellId || !_all.find(x => x.id === c.parentCellId));
+    if (!roots.length) {
+      container.innerHTML = `
+        <div class="table-empty">
+          <div class="table-empty-icon">${IC.cells}</div>
+          No hay células cargadas.
+          ${APP.user?.role === 'admin' ? `<button class="btn btn-primary" style="margin-top:14px" onclick="CellsModule.openModal()">＋ Nueva Célula</button>` : ''}
+        </div>`;
+      return;
+    }
+    roots.forEach(cell => {
+      container.appendChild(_renderNode(cell, childrenMap, 0));
+    });
+  }
+
+  function _getDepth(cellId, childrenMap) {
+    let depth = 0;
+    let current = _all.find(c => c.id === cellId);
+    while (current && current.parentCellId) {
+      const parent = _all.find(c => c.id === current.parentCellId);
+      if (!parent) break;
+      depth++;
+      current = parent;
+    }
+    return depth;
+  }
+
+  function _renderNode(cell, childrenMap, depth) {
+    const children = childrenMap[cell.id] || [];
+    const hasChildren = children.length > 0;
+    const isOpen = _expanded[cell.id] !== false;
+
+    const nodeEl = document.createElement('div');
+    nodeEl.className = 'ctv2-node';
+
+    nodeEl.appendChild(_renderCard(cell, childrenMap, depth, true));
+
+    if (hasChildren && isOpen) {
+      const childrenWrap = document.createElement('div');
+      childrenWrap.className = 'ctv2-children';
+      const pal = DEPTH[Math.min(depth, 3)];
+      childrenWrap.style.borderLeftColor = pal.accent + '40';
+
+      children.forEach(child => {
+        const childRow = document.createElement('div');
+        childRow.className = 'ctv2-child-row';
+        // Conector horizontal
+        const connector = document.createElement('div');
+        connector.className = 'ctv2-connector';
+        connector.style.background = pal.accent + '50';
+        childRow.appendChild(connector);
+        childRow.appendChild(_renderNode(child, childrenMap, depth + 1));
+        childrenWrap.appendChild(childRow);
+      });
+
+      nodeEl.appendChild(childrenWrap);
+    }
+
+    return nodeEl;
+  }
+
+  function _renderCard(cell, childrenMap, depth, withToggle) {
+    const isAdmin    = APP.user?.role === 'admin';
+    const pal        = DEPTH[Math.min(depth, 3)];
+    const children   = childrenMap[cell.id] || [];
+    const hasKids    = children.length > 0;
+    const isOpen     = _expanded[cell.id] !== false;
+    const directM    = _countDirectMembers(cell);
+    const totalM     = _countTotalMembers(cell.id, childrenMap);
+    const hasExtra   = totalM > directM.length;
+    const church     = _churches.find(ch => ch.id === cell.churchId);
+
+    const card = document.createElement('div');
+    card.className = 'ctv2-card';
+    card.style.borderLeftColor = pal.accent;
+
+    if (withToggle && hasKids) {
+      card.style.cursor = 'pointer';
+      card.addEventListener('click', e => {
+        if (e.target.closest('.ctv2-act-btn')) return;
+        _expanded[cell.id] = !isOpen;
+        // Re-renderizar el árbol completo
+        const treeWrap = document.querySelector('.ctv2-tree');
+        if (treeWrap) _repaint(treeWrap, _buildChildrenMap());
+        // Actualizar texto del botón toggle
+        const tBtn = document.getElementById('ctv2-toggle-all');
+        if (tBtn) {
+          const allExp = _all.every(c => _expanded[c.id] !== false);
+          tBtn.textContent = allExp ? '⊟ Contraer todo' : '⊞ Expandir todo';
+        }
+      });
+    }
+
+    // ── Header (nombre + chevron + badges)
+    const memberLabel = hasExtra
+      ? `${directM.length} · ${totalM} total`
+      : `${directM.length}`;
+
+    card.innerHTML = `
+      <div class="ctv2-card-header">
+        <div style="display:flex;align-items:center;gap:7px;min-width:0;flex:1">
+          ${withToggle && hasKids
+            ? `<span class="ctv2-chevron${isOpen ? ' open' : ''}" style="color:${pal.accent}">▶</span>`
+            : ''}
+          <span class="ctv2-name">${H.escape(cell.name)}</span>
+        </div>
+        <div class="ctv2-badges">
+          <span class="ctv2-badge" style="background:${pal.bg};color:${pal.text};border-color:${pal.border}">
+            👥 ${memberLabel}
+          </span>
+          <span class="ctv2-badge" style="background:${pal.bg};color:${pal.text};border-color:${pal.border}">
+            ${CAT_LABELS[cell.category] || cell.category || 'General'}
+          </span>
+        </div>
+      </div>
+
+      <div class="ctv2-meta">
+        <span class="ctv2-meta-item">👤 ${H.escape(cell.leader || '—')}</span>
+        ${cell.schedule ? `<span class="ctv2-meta-item">📅 ${H.escape(cell.schedule)}</span>` : ''}
+        ${cell.location ? `<span class="ctv2-meta-item">📍 ${H.escape(cell.location)}</span>` : ''}
+        ${church        ? `<span class="ctv2-meta-item">🏛 ${H.escape(church.name)}</span>` : ''}
+        ${hasKids && isOpen
+          ? `<span class="ctv2-subbadge" style="background:${pal.bg};color:${pal.text};border-color:${pal.border}">
+               ⬡ ${children.length} subcélula${children.length !== 1 ? 's' : ''}
+             </span>`
+          : ''}
+      </div>`;
+
+    // ── Footer (avatars + acciones)
+    const footer = document.createElement('div');
+    footer.className = 'ctv2-footer';
+
+    // Avatars
+    const avatarWrap = document.createElement('div');
+    avatarWrap.className = 'ctv2-avatars';
+    const shown = directM.slice(0, 5);
+    [...shown].reverse().forEach(p => {
+      const av = document.createElement('div');
+      av.className = 'ctv2-av';
+      av.title = H.fullName(p);
+      av.style.cssText = `background:${pal.accent}22;color:${pal.accent};border-color:var(--bg-surface,#fff)`;
+      if (p.photoUrl) {
+        av.innerHTML = `<img src="${H.escape(p.photoUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:50%">`;
+      } else {
+        av.textContent = H.initials(H.fullName(p));
+      }
+      avatarWrap.appendChild(av);
+    });
+    if (directM.length > 5) {
+      const more = document.createElement('div');
+      more.className = 'ctv2-av ctv2-av-more';
+      more.textContent = `+${directM.length - 5}`;
+      avatarWrap.appendChild(more);
+    }
+
+    // Botones de acción
+    const actWrap = document.createElement('div');
+    actWrap.style.cssText = 'display:flex;gap:6px;align-items:center';
+
+    const btnMembers = document.createElement('button');
+    btnMembers.className = 'ctv2-act-btn';
+    btnMembers.title = 'Ver integrantes';
+    btnMembers.style.borderColor = pal.border;
+    btnMembers.innerHTML = '👥';
+    btnMembers.addEventListener('click', e => {
+      e.stopPropagation();
+      _openMembersModal(cell, pal);
+    });
+    actWrap.appendChild(btnMembers);
+
+    if (isAdmin) {
+      const btnEdit = document.createElement('button');
+      btnEdit.className = 'ctv2-act-btn';
+      btnEdit.title = 'Editar célula';
+      btnEdit.style.borderColor = pal.border;
+      btnEdit.innerHTML = IC.edit;
+      btnEdit.addEventListener('click', e => {
+        e.stopPropagation();
+        openModal(cell);
+      });
+      actWrap.appendChild(btnEdit);
+    }
+
+    footer.appendChild(avatarWrap);
+    footer.appendChild(actWrap);
+    card.appendChild(footer);
+
+    return card;
+  }
+
+  // ── Modal Integrantes ───────────────────────────────────
+
+  function _openMembersModal(cell, pal) {
+    const members = _countDirectMembers(cell);
+    const childrenMap = _buildChildrenMap();
+    const totalM = _countTotalMembers(cell.id, childrenMap);
+
+    const rows = members.map(p => `
+      <div class="ctv2-member-row">
+        <div class="person-cell">
+          <div class="person-avatar" style="background:${pal.accent}18;color:${pal.accent}">
+            ${p.photoUrl ? `<img src="${H.escape(p.photoUrl)}">` : H.initials(H.fullName(p))}
+          </div>
+          <div>
+            <div class="person-name">${H.escape(H.fullName(p))}</div>
+            <div class="person-sub">${H.escape(p.phone || p.email || '')}</div>
+          </div>
+        </div>
+      </div>`).join('');
+
+    Modal.open({
+      title: `Integrantes — ${H.escape(cell.name)}`,
+      size: 'md',
+      body: `
+        <div style="display:flex;align-items:center;gap:10px;padding:12px 16px;border-radius:10px;
+             background:${pal.bg};border:1px solid ${pal.border};margin-bottom:16px">
+          <span style="font-size:20px">⬡</span>
+          <div>
+            <div style="font-size:14px;font-weight:600;color:${pal.text}">${H.escape(cell.name)}</div>
+            <div style="font-size:12px;color:var(--text-muted)">
+              Líder: ${H.escape(cell.leader || '—')} ·
+              ${members.length} directo${members.length !== 1 ? 's' : ''}
+              ${totalM > members.length ? ` · ${totalM} total (con subcélulas)` : ''}
+            </div>
+          </div>
+        </div>
+        ${members.length
+          ? `<div class="ctv2-members-list">${rows}</div>`
+          : `<div class="table-empty" style="padding:24px"><div class="table-empty-icon">👤</div>Sin integrantes directos</div>`
+        }`,
+      footer: `<button class="btn btn-ghost" onclick="Modal.close()">Cerrar</button>`,
+    });
+  }
+
+  // ── Modal Crear / Editar célula ─────────────────────────
+
+  async function openModal(cell) {
+    const churches = await API.getChurches().catch(() => []);
+    const isEdit   = !!(cell && cell.id);
+
+    const catOpts  = CONFIG.CELL_CATEGORIES.map(c =>
+      `<option value="${c.value}" ${cell?.category === c.value ? 'selected' : ''}>${c.label}</option>`
+    ).join('');
+    const chOpts   = churches.map(c =>
+      `<option value="${c.id}" ${cell?.churchId === c.id ? 'selected' : ''}>${H.escape(c.name)}</option>`
+    ).join('');
+    const parentOpts = _all
+      .filter(c => !cell || c.id !== cell.id)
+      .map(c => `<option value="${c.id}" ${cell?.parentCellId === c.id ? 'selected' : ''}>${H.escape(c.name)} — ${H.escape(c.leader || '')}</option>`)
+      .join('');
+
+    Modal.open({
+      title: isEdit ? 'Editar célula' : 'Nueva célula',
+      size: 'md',
+      body: `
+        <div class="form-group">
+          <label class="form-label">Nombre *</label>
+          <input class="form-input" id="cl-name" value="${H.escape(cell?.name || '')}" placeholder="Nombre de la célula">
+        </div>
+        <div class="form-row form-row-2">
+          <div class="form-group">
+            <label class="form-label">Líder *</label>
+            <input class="form-input" id="cl-leader" value="${H.escape(cell?.leader || '')}">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Categoría</label>
+            <select class="form-select" id="cl-cat">
+              <option value="">General</option>${catOpts}
+            </select>
+          </div>
+        </div>
+        <div class="form-row form-row-2">
+          <div class="form-group">
+            <label class="form-label">Horario</label>
+            <input class="form-input" id="cl-sched" value="${H.escape(cell?.schedule || '')}" placeholder="Ej: Lunes 20:00">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Ubicación</label>
+            <input class="form-input" id="cl-loc" value="${H.escape(cell?.location || '')}">
+          </div>
+        </div>
+        <div class="form-row form-row-2">
+          <div class="form-group">
+            <label class="form-label">Nexo</label>
+            <select class="form-select" id="cl-church">
+              <option value="">Sin nexo</option>${chOpts}
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Célula padre (jerarquía)</label>
+            <select class="form-select" id="cl-parent">
+              <option value="">— Sin padre (raíz) —</option>${parentOpts}
+            </select>
+          </div>
+        </div>
+        <div id="cl-msg"></div>`,
+      footer: `
+        <button class="btn btn-ghost" onclick="Modal.close()">Cancelar</button>
+        ${isEdit ? `<button class="btn btn-danger" style="margin-right:auto" onclick="CellsModule.deleteCell('${cell.id}','${H.escape(cell.name)}')">Eliminar</button>` : ''}
+        <button class="btn btn-primary" onclick="CellsModule._submit('${cell?.id || ''}')">
+          ${isEdit ? 'Guardar cambios' : 'Crear célula'}
+        </button>`,
+    });
+  }
+
+  async function _submit(id) {
+    const data = {
+      name:         (document.getElementById('cl-name')?.value || '').trim(),
+      leader:       (document.getElementById('cl-leader')?.value || '').trim(),
+      category:     document.getElementById('cl-cat')?.value || '',
+      schedule:     (document.getElementById('cl-sched')?.value || '').trim(),
+      location:     (document.getElementById('cl-loc')?.value || '').trim(),
+      churchId:     document.getElementById('cl-church')?.value || '',
+      parentCellId: document.getElementById('cl-parent')?.value || '',
+    };
+    if (id) data.id = id;
+
+    const msgEl = document.getElementById('cl-msg');
+    if (!data.name || !data.leader) {
+      if (msgEl) msgEl.innerHTML = `<div class="form-msg form-msg-error">Nombre y líder son requeridos</div>`;
+      return;
+    }
+    const btn = document.querySelector('#modal-overlay .btn-primary');
+    if (btn) { btn.disabled = true; btn.textContent = 'Guardando…'; }
+    try {
+      await API.saveCell(data);
+      Modal.close();
+      Toast.success(id ? 'Célula actualizada' : 'Célula creada');
+      await render();
+    } catch (e) {
+      if (msgEl) msgEl.innerHTML = `<div class="form-msg form-msg-error">${H.escape(e.message)}</div>`;
+      if (btn) { btn.disabled = false; btn.textContent = id ? 'Guardar cambios' : 'Crear célula'; }
+    }
+  }
+
+  async function deleteCell(id, name) {
+    const ok = await Modal.confirm({
+      title: 'Eliminar célula',
+      message: `¿Eliminar la célula <strong>${H.escape(name)}</strong>? Esta acción no se puede deshacer.`,
+      confirmText: 'Eliminar',
+    });
+    if (!ok) return;
+    try {
+      await API.deleteCell(id);
+      Toast.success('Célula eliminada');
+      await render();
+    } catch (e) { Toast.error(e.message); }
+  }
+
+  // ── API pública ─────────────────────────────────────────
+
+  return { render, openModal, _submit, deleteCell };
+})();
+
+// ═══════════════════════════════════════════════════════════
+// CHURCHES MODULE — Rediseño v2
+// ═══════════════════════════════════════════════════════════
+const ChurchesModule = (() => {
+
+  let _all      = [];
+  let _people   = [];
+  let _cells    = [];
+  let _query    = '';
+  let _filter   = 'all'; // 'all' | country code
+
+  // ── Carga ───────────────────────────────────────────────
+
+  async function render() {
+    const sect = document.getElementById('sect-churches');
+    if (!sect) return;
+    sect.innerHTML = `<div class="sect-loading"><div class="spinner"></div></div>`;
+    try {
+      [_all, _people, _cells] = await Promise.all([
+        API.getChurches(),
+        API.getPeople().catch(() => []),
+        API.getCells().catch(() => []),
+      ]);
+      sect.innerHTML = '';
+      sect.appendChild(_buildPage());
+    } catch (e) {
+      sect.innerHTML = _renderError(e.message);
+    }
+  }
+
+  // ── Helpers de datos ────────────────────────────────────
+
+  function _peopleOf(churchId) {
+    return _people.filter(p => p.churchId === churchId);
+  }
+
+  function _cellsOf(churchId) {
+    return _cells.filter(c => c.churchId === churchId);
+  }
+
+  function _countries() {
+    return [...new Set(_all.map(c => c.country).filter(Boolean))].sort();
+  }
+
+  function _countryFlag(country) {
+    if (!country) return '🌐';
+    const flags = {
+      'Argentina':'🇦🇷','Bolivia':'🇧🇴','Brasil':'🇧🇷','Chile':'🇨🇱',
+      'Colombia':'🇨🇴','Costa Rica':'🇨🇷','Cuba':'🇨🇺','Rep. Dominicana':'🇩🇴',
+      'Ecuador':'🇪🇨','El Salvador':'🇸🇻','Guatemala':'🇬🇹','Honduras':'🇭🇳',
+      'México':'🇲🇽','Nicaragua':'🇳🇮','Panamá':'🇵🇦','Paraguay':'🇵🇾',
+      'Perú':'🇵🇪','Puerto Rico':'🇵🇷','Uruguay':'🇺🇾','Venezuela':'🇻🇪',
+      'Estados Unidos':'🇺🇸','España':'🇪🇸','Italia':'🇮🇹','Portugal':'🇵🇹',
+    };
+    return flags[country] || '🌐';
+  }
+
+  function _initials(name) {
+    if (!name) return '?';
+    return name.trim().split(/\s+/).slice(0, 2).map(w => w[0].toUpperCase()).join('');
+  }
+
+  // ── Construcción de la página ────────────────────────────
+
+  function _buildPage() {
+    const isAdmin    = APP.user?.role === 'admin';
+    const countries  = _countries();
+    const totalPeople = _people.filter(p => _all.some(c => c.id === p.churchId)).length;
+
+    const wrap = document.createElement('div');
+    wrap.className = 'nxv2-page';
+
+    // ── Hero
+    const heroEl = document.createElement('div');
+    heroEl.className = 'nxv2-hero';
+    heroEl.innerHTML = `
+      <div class="nxv2-hero-band"></div>
+      <div class="nxv2-hero-body">
+        <div class="nxv2-hero-left">
+          <div class="nxv2-hero-icon">${IC.churches}</div>
+          <div>
+            <div class="nxv2-hero-eyebrow">Red Eclesiástica</div>
+            <h1 class="nxv2-hero-title">Nexos</h1>
+          </div>
+        </div>
+        <div class="nxv2-hero-right">
+          <div class="nxv2-stats">
+            <div class="nxv2-stat">
+              <span class="nxv2-stat-val" style="color:#6D28D9">${_all.length}</span>
+              <span class="nxv2-stat-lbl">nexos</span>
+            </div>
+            <div class="nxv2-stat-sep"></div>
+            <div class="nxv2-stat">
+              <span class="nxv2-stat-val" style="color:#0891B2">${countries.length}</span>
+              <span class="nxv2-stat-lbl">países</span>
+            </div>
+            <div class="nxv2-stat-sep"></div>
+            <div class="nxv2-stat">
+              <span class="nxv2-stat-val" style="color:#16A34A">${totalPeople}</span>
+              <span class="nxv2-stat-lbl">personas</span>
+            </div>
+            <div class="nxv2-stat-sep"></div>
+            <div class="nxv2-stat">
+              <span class="nxv2-stat-val" style="color:#D97706">${_cells.length}</span>
+              <span class="nxv2-stat-lbl">células</span>
+            </div>
+          </div>
+          ${isAdmin ? `<button class="btn btn-primary nxv2-new-btn" id="nxv2-new-btn">＋ Nuevo Nexo</button>` : ''}
+        </div>
+      </div>`;
+    wrap.appendChild(heroEl);
+
+    // ── Toolbar: buscador + filtro por país
+    const toolbar = document.createElement('div');
+    toolbar.className = 'nxv2-toolbar';
+
+    const searchWrap = document.createElement('div');
+    searchWrap.className = 'nxv2-search';
+    searchWrap.innerHTML = `<span class="nxv2-search-icon">${IC.search}</span>`;
+    const searchInput = document.createElement('input');
+    searchInput.className = 'nxv2-search-input';
+    searchInput.placeholder = 'Buscar nexo, país, pastor...';
+    searchInput.value = _query;
+    searchInput.addEventListener('input', e => {
+      _query = e.target.value.toLowerCase().trim();
+      _repaint(gridEl);
+    });
+    searchWrap.appendChild(searchInput);
+
+    // Pills de país
+    const pillsWrap = document.createElement('div');
+    pillsWrap.className = 'nxv2-pills';
+    pillsWrap.innerHTML = `
+      <button class="nxv2-pill${_filter === 'all' ? ' active' : ''}" data-val="all">
+        🌎 Todos
+      </button>
+      ${countries.map(c => `
+        <button class="nxv2-pill${_filter === c ? ' active' : ''}" data-val="${H.escape(c)}">
+          ${_countryFlag(c)} ${H.escape(c)}
+        </button>`).join('')}`;
+
+    pillsWrap.querySelectorAll('.nxv2-pill').forEach(btn => {
+      btn.addEventListener('click', () => {
+        _filter = btn.dataset.val;
+        pillsWrap.querySelectorAll('.nxv2-pill').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        _repaint(gridEl);
+      });
+    });
+
+    toolbar.appendChild(searchWrap);
+    toolbar.appendChild(pillsWrap);
+    wrap.appendChild(toolbar);
+
+    // ── Grid de cards
+    const gridEl = document.createElement('div');
+    gridEl.className = 'nxv2-grid';
+    _repaint(gridEl);
+    wrap.appendChild(gridEl);
+
+    // Wiring
+    wrap.querySelector('#nxv2-new-btn')?.addEventListener('click', () => openModal());
+
+    return wrap;
+  }
+
+  // ── Render del grid ─────────────────────────────────────
+
+  function _repaint(container) {
+    container.innerHTML = '';
+
+    let list = [..._all];
+    if (_filter !== 'all') {
+      list = list.filter(c => c.country === _filter);
+    }
+    if (_query) {
+      list = list.filter(c =>
+        H.matches(c.name, _query)    ||
+        H.matches(c.fullName, _query)||
+        H.matches(c.country, _query) ||
+        H.matches(c.pastors, _query) ||
+        H.matches(c.email, _query)
+      );
+    }
+
+    if (!list.length) {
+      container.innerHTML = `
+        <div class="nxv2-empty">
+          <div class="nxv2-empty-icon">${IC.churches}</div>
+          <div class="nxv2-empty-title">${_query || _filter !== 'all' ? 'Sin resultados' : 'No hay nexos'}</div>
+          <div class="nxv2-empty-sub">${_query || _filter !== 'all' ? 'Probá con otro filtro.' : 'Creá el primer nexo de la red.'}</div>
+          ${APP.user?.role === 'admin' && !_query && _filter === 'all'
+            ? `<button class="btn btn-primary" style="margin-top:16px" onclick="ChurchesModule.openModal()">＋ Nuevo Nexo</button>`
+            : ''}
+        </div>`;
+      return;
+    }
+
+    list.forEach(church => {
+      container.appendChild(_renderCard(church));
+    });
+  }
+
+  function _renderCard(church) {
+    const isAdmin  = APP.user?.role === 'admin';
+    const people   = _peopleOf(church.id);
+    const cells    = _cellsOf(church.id);
+    const flag     = _countryFlag(church.country);
+    const pastors  = (church.pastors || '').split(',').map(s => s.trim()).filter(Boolean);
+    const hasLogo  = !!church.logoUrl;
+
+    const card = document.createElement('div');
+    card.className = 'nxv2-card';
+
+    // ── Header con logo / iniciales
+    const logoEl = hasLogo
+      ? `<img src="${H.escape(church.logoUrl)}" alt="${H.escape(church.name)}" class="nxv2-logo-img">`
+      : `<div class="nxv2-logo-initials">${_initials(church.name)}</div>`;
+
+    card.innerHTML = `
+      <div class="nxv2-card-header">
+        <div class="nxv2-logo">${logoEl}</div>
+        <div class="nxv2-card-top">
+          <div class="nxv2-card-name">${H.escape(church.name)}</div>
+          ${church.fullName && church.fullName !== church.name
+            ? `<div class="nxv2-card-fullname">${H.escape(church.fullName)}</div>`
+            : ''}
+          <div class="nxv2-country-pill">
+            <span>${flag}</span>
+            <span>${H.escape(church.country || '—')}</span>
+          </div>
+        </div>
+        ${isAdmin ? `
+          <button class="nxv2-edit-btn" id="nxv2-edit-${church.id}" title="Editar nexo">
+            ${IC.edit}
+          </button>` : ''}
+      </div>
+
+      <div class="nxv2-divider"></div>
+
+      <div class="nxv2-card-body">
+        ${pastors.length ? `
+          <div class="nxv2-info-row">
+            <span class="nxv2-info-icon">👑</span>
+            <div class="nxv2-info-content">
+              <span class="nxv2-info-label">Pastor${pastors.length > 1 ? 'es' : ''}</span>
+              <span class="nxv2-info-value">${pastors.map(p => H.escape(p)).join(' · ')}</span>
+            </div>
+          </div>` : ''}
+
+        ${church.address ? `
+          <div class="nxv2-info-row">
+            <span class="nxv2-info-icon">📍</span>
+            <div class="nxv2-info-content">
+              <span class="nxv2-info-label">Dirección</span>
+              <span class="nxv2-info-value">${H.escape(church.address)}</span>
+            </div>
+          </div>` : ''}
+
+        ${church.email ? `
+          <div class="nxv2-info-row">
+            <span class="nxv2-info-icon">✉</span>
+            <div class="nxv2-info-content">
+              <span class="nxv2-info-label">Email</span>
+              <span class="nxv2-info-value">
+                <a href="mailto:${H.escape(church.email)}" class="nxv2-link" onclick="event.stopPropagation()">
+                  ${H.escape(church.email)}
+                </a>
+              </span>
+            </div>
+          </div>` : ''}
+
+        ${church.phone ? `
+          <div class="nxv2-info-row">
+            <span class="nxv2-info-icon">📞</span>
+            <div class="nxv2-info-content">
+              <span class="nxv2-info-label">Teléfono</span>
+              <span class="nxv2-info-value">${H.escape(church.phone)}</span>
+            </div>
+          </div>` : ''}
+      </div>
+
+      <div class="nxv2-card-footer">
+        <div class="nxv2-footer-stats">
+          <div class="nxv2-footer-stat">
+            <span class="nxv2-footer-stat-val">${people.length}</span>
+            <span class="nxv2-footer-stat-lbl">persona${people.length !== 1 ? 's' : ''}</span>
+          </div>
+          <div class="nxv2-footer-stat-sep"></div>
+          <div class="nxv2-footer-stat">
+            <span class="nxv2-footer-stat-val">${cells.length}</span>
+            <span class="nxv2-footer-stat-lbl">célula${cells.length !== 1 ? 's' : ''}</span>
+          </div>
+        </div>
+        ${isAdmin ? `
+          <button class="nxv2-detail-btn" id="nxv2-detail-${church.id}">
+            Ver detalle →
+          </button>` : ''}
+      </div>`;
+
+    // Wiring botones
+    card.querySelector(`#nxv2-edit-${church.id}`)?.addEventListener('click', e => {
+      e.stopPropagation();
+      openModal(church);
+    });
+    card.querySelector(`#nxv2-detail-${church.id}`)?.addEventListener('click', e => {
+      e.stopPropagation();
+      _openDetailModal(church, people, cells);
+    });
+
+    return card;
+  }
+
+  // ── Modal de detalle ─────────────────────────────────────
+
+  function _openDetailModal(church, people, cells) {
+    const flag    = _countryFlag(church.country);
+    const pastors = (church.pastors || '').split(',').map(s => s.trim()).filter(Boolean);
+
+    const peopleRows = people.slice(0, 10).map(p => `
+      <div class="nxv2-member-row">
+        <div class="person-cell">
+          <div class="person-avatar" style="background:#EDE9FE;color:#6D28D9">
+            ${p.photoUrl ? `<img src="${H.escape(p.photoUrl)}">` : H.initials(H.fullName(p))}
+          </div>
+          <div>
+            <div class="person-name">${H.escape(H.fullName(p))}</div>
+            <div class="person-sub">${H.escape(p.phone || p.email || '')}</div>
+          </div>
+        </div>
+      </div>`).join('');
+
+    const cellRows = cells.map(c => `
+      <div class="nxv2-cell-row">
+        <span style="font-size:16px">⬡</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;font-weight:600;color:var(--text-primary)">${H.escape(c.name)}</div>
+          <div style="font-size:11px;color:var(--text-muted)">Líder: ${H.escape(c.leader || '—')}</div>
+        </div>
+        ${c.schedule ? `<span style="font-size:11px;color:var(--text-muted);white-space:nowrap">${H.escape(c.schedule)}</span>` : ''}
+      </div>`).join('');
+
+    Modal.open({
+      title: `${flag} ${church.name}`,
+      size: 'lg',
+      body: `
+        <div class="nxv2-detail-grid">
+
+          <div class="nxv2-detail-section">
+            <div class="nxv2-detail-section-title">Información</div>
+            ${church.fullName ? `
+              <div class="nxv2-detail-row">
+                <span class="nxv2-detail-label">Nombre completo</span>
+                <span class="nxv2-detail-val">${H.escape(church.fullName)}</span>
+              </div>` : ''}
+            <div class="nxv2-detail-row">
+              <span class="nxv2-detail-label">País</span>
+              <span class="nxv2-detail-val">${flag} ${H.escape(church.country || '—')}</span>
+            </div>
+            ${church.address ? `
+              <div class="nxv2-detail-row">
+                <span class="nxv2-detail-label">Dirección</span>
+                <span class="nxv2-detail-val">${H.escape(church.address)}</span>
+              </div>` : ''}
+            ${church.email ? `
+              <div class="nxv2-detail-row">
+                <span class="nxv2-detail-label">Email</span>
+                <span class="nxv2-detail-val">
+                  <a href="mailto:${H.escape(church.email)}" class="nxv2-link">${H.escape(church.email)}</a>
+                </span>
+              </div>` : ''}
+            ${church.phone ? `
+              <div class="nxv2-detail-row">
+                <span class="nxv2-detail-label">Teléfono</span>
+                <span class="nxv2-detail-val">${H.escape(church.phone)}</span>
+              </div>` : ''}
+            ${pastors.length ? `
+              <div class="nxv2-detail-row">
+                <span class="nxv2-detail-label">Pastores</span>
+                <div style="display:flex;flex-direction:column;gap:4px">
+                  ${pastors.map(p => `
+                    <span class="nxv2-pastor-chip">👑 ${H.escape(p)}</span>`).join('')}
+                </div>
+              </div>` : ''}
+          </div>
+
+          <div class="nxv2-detail-section">
+            <div class="nxv2-detail-section-title" style="display:flex;justify-content:space-between">
+              <span>Personas <span class="nxv2-count-badge">${people.length}</span></span>
+            </div>
+            ${people.length
+              ? `<div class="nxv2-members-list">${peopleRows}</div>
+                 ${people.length > 10
+                    ? `<div style="font-size:12px;color:var(--text-muted);text-align:center;padding:8px">
+                         +${people.length - 10} más...
+                       </div>`
+                    : ''}`
+              : `<div class="nxv2-empty-sm">Sin personas asociadas</div>`}
+          </div>
+
+          <div class="nxv2-detail-section nxv2-detail-full">
+            <div class="nxv2-detail-section-title">
+              Células <span class="nxv2-count-badge">${cells.length}</span>
+            </div>
+            ${cells.length
+              ? `<div class="nxv2-cells-list">${cellRows}</div>`
+              : `<div class="nxv2-empty-sm">Sin células asociadas</div>`}
+          </div>
+
+        </div>`,
+      footer: `
+        <button class="btn btn-ghost" onclick="Modal.close()">Cerrar</button>
+        ${APP.user?.role === 'admin'
+          ? `<button class="btn btn-primary" onclick="Modal.close(); ChurchesModule.openModal(${JSON.stringify(church).replace(/"/g, '&quot;')})">
+               ${IC.edit} Editar nexo
+             </button>`
+          : ''}`,
+    });
+  }
+
+  // ── Modal Crear / Editar ─────────────────────────────────
+
+  async function openModal(ch) {
+    const isEdit = !!(ch && ch.id);
+    Modal.open({
+      title: isEdit ? `Editar — ${H.escape(ch.name)}` : 'Nuevo Nexo',
+      size: 'md',
+      body: `
+        <div class="form-row form-row-2">
+          <div class="form-group">
+            <label class="form-label">Nombre corto *</label>
+            <input class="form-input" id="ch-name" value="${H.escape(ch?.name || '')}" placeholder="Ej: JCV Central">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Nombre completo</label>
+            <input class="form-input" id="ch-full" value="${H.escape(ch?.fullName || '')}" placeholder="Nombre oficial">
+          </div>
+        </div>
+        <div class="form-row form-row-2">
+          <div class="form-group">
+            <label class="form-label">País *</label>
+            <input class="form-input" id="ch-country" value="${H.escape(ch?.country || 'Argentina')}" placeholder="Argentina">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Teléfono</label>
+            <input class="form-input" id="ch-phone" type="tel" value="${H.escape(ch?.phone || '')}" placeholder="+54 11...">
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Dirección</label>
+          <input class="form-input" id="ch-addr" value="${H.escape(ch?.address || '')}" placeholder="Calle, número, ciudad">
+        </div>
+        <div class="form-row form-row-2">
+          <div class="form-group">
+            <label class="form-label">Email</label>
+            <input class="form-input" id="ch-email" type="email" value="${H.escape(ch?.email || '')}" placeholder="contacto@iglesia.com">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Pastores</label>
+            <input class="form-input" id="ch-pastors" value="${H.escape(ch?.pastors || '')}" placeholder="Nombre1, Nombre2">
+          </div>
+        </div>
+        <div id="ch-msg"></div>`,
+      footer: `
+        <button class="btn btn-ghost" onclick="Modal.close()">Cancelar</button>
+        ${isEdit
+          ? `<button class="btn btn-danger" style="margin-right:auto"
+               onclick="ChurchesModule.deleteChurch('${ch.id}','${H.escape(ch.name)}')">
+               Eliminar
+             </button>`
+          : ''}
+        <button class="btn btn-primary" onclick="ChurchesModule._submit('${ch?.id || ''}')">
+          ${isEdit ? 'Guardar cambios' : 'Crear nexo'}
+        </button>`,
+    });
+  }
+
+  async function _submit(id) {
+    const data = {
+      name:     (document.getElementById('ch-name')?.value || '').trim(),
+      fullName: (document.getElementById('ch-full')?.value || '').trim(),
+      country:  (document.getElementById('ch-country')?.value || '').trim(),
+      email:    (document.getElementById('ch-email')?.value || '').trim(),
+      phone:    (document.getElementById('ch-phone')?.value || '').trim(),
+      pastors:  (document.getElementById('ch-pastors')?.value || '').trim(),
+      address:  (document.getElementById('ch-addr')?.value || '').trim(),
+    };
+    if (id) data.id = id;
+
+    const msgEl = document.getElementById('ch-msg');
+    if (!data.name || !data.country) {
+      if (msgEl) msgEl.innerHTML = `<div class="form-msg form-msg-error">Nombre y país son requeridos</div>`;
+      return;
+    }
+    const btn = document.querySelector('#modal-overlay .btn-primary');
+    if (btn) { btn.disabled = true; btn.textContent = 'Guardando…'; }
+    try {
+      await API.saveChurch(data);
+      Modal.close();
+      Toast.success(id ? 'Nexo actualizado' : 'Nexo creado');
+      await render();
+    } catch (e) {
+      if (msgEl) msgEl.innerHTML = `<div class="form-msg form-msg-error">${H.escape(e.message)}</div>`;
+      if (btn) { btn.disabled = false; btn.textContent = id ? 'Guardar cambios' : 'Crear nexo'; }
+    }
+  }
+
+  /*function _onSearch(q) {
+    _filtered = H.filterBySearch(_all, q, ['name','country','pastors','email']);
+    _renderTable();
+    const tot = document.getElementById('ch-total');
+    if (tot) tot.textContent = _filtered.length;
+  }*/
+
+  async function deleteChurch(id, name) {
+    const ok = await Modal.confirm({
+      title: 'Eliminar nexo',
+      message: `¿Eliminar el nexo <strong>${H.escape(name)}</strong>? Se desvinculará de todas las personas y células asociadas.`,
+      confirmText: 'Eliminar',
+    });
+    if (!ok) return;
+    Modal.close();
+    try {
+      await API.deleteChurch(id);
+      Toast.success('Nexo eliminado');
+      await render();
+    } catch (e) { Toast.error(e.message); }
+  }
+
+  return { render, openModal, _submit, deleteChurch };
+})();
+
+// ═══════════════════════════════════════════════════════════
+// MINISTRIES MODULE — Rediseño v2
+// ═══════════════════════════════════════════════════════════
+const MinistriesModule = (() => {
+
+  let _all     = [];
+  let _people  = [];
+  let _query   = '';
+  let _typeFilter = 'all';
+
+  // ── Configuración de tipos ──────────────────────────────
+
+  const TYPE_CFG = {
+    alabanza:    { label:'Alabanza',      icon:'🎵', color:'#7C3AED', bg:'#F5F3FF', border:'#EDE9FE', dark:'#4C1D95' },
+    ensenanza:   { label:'Enseñanza',     icon:'📖', color:'#1D4ED8', bg:'#EFF6FF', border:'#BFDBFE', dark:'#1E3A8A' },
+    ujieres:     { label:'Ujieres',       icon:'🤝', color:'#15803D', bg:'#F0FDF4', border:'#BBF7D0', dark:'#14532D' },
+    intercesion: { label:'Intercesión',   icon:'🙏', color:'#92400E', bg:'#FFFBEB', border:'#FDE68A', dark:'#78350F' },
+    evangelismo: { label:'Evangelismo',   icon:'📢', color:'#991B1B', bg:'#FEF2F2', border:'#FECACA', dark:'#7F1D1D' },
+    jovenes:     { label:'Jóvenes',       icon:'⚡', color:'#0E7490', bg:'#ECFEFF', border:'#A5F3FC', dark:'#164E63' },
+    ninos:       { label:'Niños',         icon:'⭐', color:'#9A3412', bg:'#FFF7ED', border:'#FED7AA', dark:'#7C2D12' },
+    medios:      { label:'Medios',        icon:'🎬', color:'#9D174D', bg:'#FDF2F8', border:'#FBCFE8', dark:'#831843' },
+    accion:      { label:'Acción Social', icon:'☕', color:'#44403C', bg:'#F5F5F4', border:'#D6D3D1', dark:'#292524' },
+    otro:        { label:'Otro',          icon:'✦',  color:'#3730A3', bg:'#EEF2FF', border:'#C7D2FE', dark:'#312E81' },
+  };
+
+  function _tc(type) {
+    return TYPE_CFG[type] || TYPE_CFG.otro;
+  }
+
+  // ── Carga ───────────────────────────────────────────────
+
+  async function render() {
+    const sect = document.getElementById('sect-ministries');
+    if (!sect) return;
+    sect.innerHTML = `<div class="sect-loading"><div class="spinner"></div></div>`;
+    try {
+      [_all, _people] = await Promise.all([
+        API.getMinistries(),
+        API.getPeople().catch(() => []),
+      ]);
+      sect.innerHTML = '';
+      sect.appendChild(_buildPage());
+    } catch (e) {
+      sect.innerHTML = _renderError(e.message);
+    }
+  }
+
+  // ── Construcción de la página ────────────────────────────
+
+  function _buildPage() {
+    const isAdmin       = APP.user?.role === 'admin';
+    const totalMembers  = new Set(_all.flatMap(m => m.memberIds || [])).size;
+    const activeTypes   = [...new Set(_all.map(m => m.type).filter(Boolean))];
+
+    const wrap = document.createElement('div');
+    wrap.className = 'mnv2-page';
+
+    // ── Hero
+    wrap.innerHTML = `
+      <div class="mnv2-hero">
+        <div class="mnv2-hero-band"></div>
+        <div class="mnv2-hero-body">
+          <div class="mnv2-hero-left">
+            <div class="mnv2-hero-icon">${IC.ministries}</div>
+            <div>
+              <div class="mnv2-hero-eyebrow">Equipos de Servicio</div>
+              <h1 class="mnv2-hero-title">Ministerios</h1>
+            </div>
+          </div>
+          <div class="mnv2-hero-right">
+            <div class="mnv2-stats">
+              <div class="mnv2-stat">
+                <span class="mnv2-stat-val" style="color:#7C3AED">${_all.length}</span>
+                <span class="mnv2-stat-lbl">ministerios</span>
+              </div>
+              <div class="mnv2-stat-sep"></div>
+              <div class="mnv2-stat">
+                <span class="mnv2-stat-val" style="color:#16A34A">${totalMembers}</span>
+                <span class="mnv2-stat-lbl">integrantes</span>
+              </div>
+              <div class="mnv2-stat-sep"></div>
+              <div class="mnv2-stat">
+                <span class="mnv2-stat-val" style="color:#0E7490">${activeTypes.length}</span>
+                <span class="mnv2-stat-lbl">tipos activos</span>
+              </div>
+            </div>
+            ${isAdmin
+              ? `<button class="btn btn-primary mnv2-new-btn" id="mnv2-new-btn">＋ Nuevo Ministerio</button>`
+              : ''}
+          </div>
+        </div>
+      </div>`;
+
+    // ── Toolbar
+    const toolbar = document.createElement('div');
+    toolbar.className = 'mnv2-toolbar';
+
+    // Buscador
+    const searchWrap = document.createElement('div');
+    searchWrap.className = 'mnv2-search';
+    searchWrap.innerHTML = `<span class="mnv2-search-icon">${IC.search}</span>`;
+    const searchInput = document.createElement('input');
+    searchInput.className = 'mnv2-search-input';
+    searchInput.placeholder = 'Buscar ministerio o líder...';
+    searchInput.value = _query;
+    searchInput.addEventListener('input', e => {
+      _query = e.target.value.toLowerCase().trim();
+      _repaint(gridEl);
+    });
+    searchWrap.appendChild(searchInput);
+
+    // Pills de tipo (solo los que existen)
+    const pillsWrap = document.createElement('div');
+    pillsWrap.className = 'mnv2-pills';
+
+    const allPill = document.createElement('button');
+    allPill.className = 'mnv2-pill' + (_typeFilter === 'all' ? ' active' : '');
+    allPill.dataset.val = 'all';
+    allPill.innerHTML = `✦ Todos`;
+    allPill.addEventListener('click', () => _setTypeFilter('all', allPill, pillsWrap, gridEl));
+    pillsWrap.appendChild(allPill);
+
+    activeTypes.forEach(type => {
+      const tc  = _tc(type);
+      const btn = document.createElement('button');
+      btn.className = 'mnv2-pill' + (_typeFilter === type ? ' active' : '');
+      btn.dataset.val = type;
+      btn.innerHTML = `${tc.icon} ${tc.label}`;
+      if (_typeFilter === type) {
+        btn.style.cssText = `background:${tc.bg};color:${tc.color};border-color:${tc.border}`;
+      }
+      btn.addEventListener('click', () => _setTypeFilter(type, btn, pillsWrap, gridEl));
+      pillsWrap.appendChild(btn);
+    });
+
+    toolbar.appendChild(searchWrap);
+    toolbar.appendChild(pillsWrap);
+    wrap.appendChild(toolbar);
+
+    // ── Grid
+    const gridEl = document.createElement('div');
+    gridEl.className = 'mnv2-grid';
+    _repaint(gridEl);
+    wrap.appendChild(gridEl);
+
+    // Wiring
+    wrap.querySelector('#mnv2-new-btn')?.addEventListener('click', () => openModal());
+
+    return wrap;
+  }
+
+  function _setTypeFilter(val, activeBtn, pillsWrap, gridEl) {
+    _typeFilter = val;
+    pillsWrap.querySelectorAll('.mnv2-pill').forEach(b => {
+      b.classList.remove('active');
+      b.style.cssText = '';
+    });
+    activeBtn.classList.add('active');
+    if (val !== 'all') {
+      const tc = _tc(val);
+      activeBtn.style.cssText = `background:${tc.bg};color:${tc.color};border-color:${tc.border}`;
+    }
+    _repaint(gridEl);
+  }
+
+  // ── Render del grid ─────────────────────────────────────
+
+  function _repaint(container) {
+    container.innerHTML = '';
+
+    let list = [..._all];
+    if (_typeFilter !== 'all') list = list.filter(m => m.type === _typeFilter);
+    if (_query) {
+      list = list.filter(m =>
+        H.matches(m.name,        _query) ||
+        H.matches(m.leaders,     _query) ||
+        H.matches(m.description, _query) ||
+        H.matches(m.type,        _query)
+      );
+    }
+
+    if (!list.length) {
+      const isAdmin = APP.user?.role === 'admin';
+      container.innerHTML = `
+        <div class="mnv2-empty">
+          <div class="mnv2-empty-icon">${IC.ministries}</div>
+          <div class="mnv2-empty-title">${_query || _typeFilter !== 'all' ? 'Sin resultados' : 'No hay ministerios'}</div>
+          <div class="mnv2-empty-sub">${_query || _typeFilter !== 'all' ? 'Probá con otro filtro.' : 'Creá el primer ministerio del equipo.'}</div>
+          ${isAdmin && !_query && _typeFilter === 'all'
+            ? `<button class="btn btn-primary" style="margin-top:16px" onclick="MinistriesModule.openModal()">＋ Nuevo Ministerio</button>`
+            : ''}
+        </div>`;
+      return;
+    }
+
+    list.forEach(m => container.appendChild(_renderCard(m)));
+  }
+
+  // ── Card ────────────────────────────────────────────────
+
+  function _renderCard(ministry) {
+    const isAdmin  = APP.user?.role === 'admin';
+    const tc       = _tc(ministry.type);
+    const memberIds = ministry.memberIds || [];
+    const members  = _people.filter(p => memberIds.includes(p.id));
+    const leaders  = (ministry.leaders || '').split(',').map(s => s.trim()).filter(Boolean);
+
+    const card = document.createElement('div');
+    card.className = 'mnv2-card';
+
+    // Banda de color superior
+    const band = document.createElement('div');
+    band.className = 'mnv2-card-band';
+    band.style.background = `linear-gradient(90deg, ${tc.color}, ${tc.color}99)`;
+    card.appendChild(band);
+
+    const body = document.createElement('div');
+    body.className = 'mnv2-card-body';
+
+    // ── Header: icono + nombre + tipo
+    body.innerHTML = `
+      <div class="mnv2-card-header">
+        <div class="mnv2-type-icon" style="background:${tc.bg};color:${tc.color};border-color:${tc.border}">
+          ${tc.icon}
+        </div>
+        <div class="mnv2-card-title-wrap">
+          <div class="mnv2-card-name">${H.escape(ministry.name)}</div>
+          <span class="mnv2-type-chip" style="background:${tc.bg};color:${tc.color};border-color:${tc.border}">
+            ${tc.icon} ${tc.label}
+          </span>
+        </div>
+        ${isAdmin ? `<button class="mnv2-edit-btn" id="mnv2-edit-${ministry.id}" title="Editar">${IC.edit}</button>` : ''}
+      </div>
+
+      ${ministry.description ? `
+        <p class="mnv2-desc">${H.escape(ministry.description)}</p>` : ''}
+
+      <div class="mnv2-meta">
+        ${leaders.length ? `
+          <div class="mnv2-meta-row">
+            <span class="mnv2-meta-icon">👑</span>
+            <span class="mnv2-meta-val">${leaders.map(l => H.escape(l)).join(' · ')}</span>
+          </div>` : ''}
+        ${ministry.schedule ? `
+          <div class="mnv2-meta-row">
+            <span class="mnv2-meta-icon">📅</span>
+            <span class="mnv2-meta-val">${H.escape(ministry.schedule)}</span>
+          </div>` : ''}
+        ${ministry.location ? `
+          <div class="mnv2-meta-row">
+            <span class="mnv2-meta-icon">📍</span>
+            <span class="mnv2-meta-val">${H.escape(ministry.location)}</span>
+          </div>` : ''}
+      </div>`;
+
+    // ── Footer: avatars + contador + botón integrantes
+    const footer = document.createElement('div');
+    footer.className = 'mnv2-card-footer';
+
+    // Avatars stack
+    const avatarWrap = document.createElement('div');
+    avatarWrap.className = 'mnv2-avatars';
+    const shown = members.slice(0, 5);
+    [...shown].reverse().forEach(p => {
+      const av = document.createElement('div');
+      av.className = 'mnv2-av';
+      av.title = H.fullName(p);
+      av.style.cssText = `background:${tc.color}20;color:${tc.color};border-color:var(--bg-surface,#fff)`;
+      if (p.photoUrl) {
+        av.innerHTML = `<img src="${H.escape(p.photoUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:50%">`;
+      } else {
+        av.textContent = H.initials(H.fullName(p));
+      }
+      avatarWrap.appendChild(av);
+    });
+    if (members.length > 5) {
+      const more = document.createElement('div');
+      more.className = 'mnv2-av mnv2-av-more';
+      more.textContent = `+${members.length - 5}`;
+      avatarWrap.appendChild(more);
+    }
+
+    const memberCount = document.createElement('span');
+    memberCount.className = 'mnv2-member-count';
+    memberCount.style.color = tc.color;
+    memberCount.textContent = `${members.length} integrante${members.length !== 1 ? 's' : ''}`;
+
+    const leftSide = document.createElement('div');
+    leftSide.className = 'mnv2-footer-left';
+    leftSide.appendChild(avatarWrap);
+    leftSide.appendChild(memberCount);
+
+    const btnMembers = document.createElement('button');
+    btnMembers.className = 'mnv2-members-btn';
+    btnMembers.style.cssText = `color:${tc.color};border-color:${tc.border};background:${tc.bg}`;
+    btnMembers.innerHTML = `${IC.people} <span>Integrantes</span>`;
+    btnMembers.addEventListener('click', () => _openMembersModal(ministry, members, tc));
+
+    footer.appendChild(leftSide);
+    footer.appendChild(btnMembers);
+
+    body.appendChild(footer);
+    card.appendChild(body);
+
+    // Wiring botón editar
+    card.querySelector(`#mnv2-edit-${ministry.id}`)?.addEventListener('click', e => {
+      e.stopPropagation();
+      openModal(ministry);
+    });
+
+    return card;
+  }
+
+  // ── Modal integrantes ───────────────────────────────────
+
+  function _openMembersModal(ministry, currentMembers, tc) {
+    const isAdmin = APP.user?.role === 'admin';
+    let memberIds = [...(ministry.memberIds || [])];
+    let allPeople = [..._people];
+    let addQuery  = '';
+
+    function _buildBody() {
+      const nonMembers = H.sortBy(
+        allPeople.filter(p => !memberIds.includes(p.id)),
+        'name'
+      );
+      const membersList = allPeople.filter(p => memberIds.includes(p.id));
+
+      const membersHtml = membersList.length
+        ? membersList.map(p => `
+            <div class="mnv2-mm-row" id="mnv2-mm-${p.id}">
+              <div class="person-cell">
+                <div class="person-avatar" style="background:${tc.color}18;color:${tc.color}">
+                  ${p.photoUrl ? `<img src="${H.escape(p.photoUrl)}">` : H.initials(H.fullName(p))}
+                </div>
+                <div>
+                  <div class="person-name">${H.escape(H.fullName(p))}</div>
+                  <div class="person-sub">${H.escape(p.phone || p.email || '')}</div>
+                </div>
+              </div>
+              ${isAdmin
+                ? `<button class="mnv2-mm-remove-btn" data-pid="${p.id}" title="Quitar">✕</button>`
+                : `<span class="mnv2-mm-badge" style="background:${tc.bg};color:${tc.color};border-color:${tc.border}">✓ Miembro</span>`}
+            </div>`).join('')
+        : `<div class="mnv2-mm-empty">Sin integrantes aún</div>`;
+
+      const filteredAdd = addQuery
+        ? H.filterBySearch(nonMembers, addQuery, ['name', 'lastName'])
+        : nonMembers;
+
+      const addHtml = filteredAdd.slice(0, 20).map(p => `
+          <div class="mnv2-mm-row">
+            <div class="person-cell">
+              <div class="person-avatar">
+                ${p.photoUrl ? `<img src="${H.escape(p.photoUrl)}">` : H.initials(H.fullName(p))}
+              </div>
+              <div>
+                <div class="person-name">${H.escape(H.fullName(p))}</div>
+                <div class="person-sub">${H.escape(p.phone || p.email || '')}</div>
+              </div>
+            </div>
+            <button class="mnv2-mm-add-btn" data-pid="${p.id}"
+              style="border-color:${tc.border};color:${tc.color};background:${tc.bg}">
+              ＋
+            </button>
+          </div>`).join('')
+        || `<div class="mnv2-mm-empty">Sin resultados</div>`;
+
+      return `
+        <div class="mnv2-mm-layout">
+          <div class="mnv2-mm-col">
+            <div class="mnv2-mm-col-header">
+              <span class="mnv2-mm-col-title">Integrantes actuales</span>
+              <span class="mnv2-mm-count" style="background:${tc.bg};color:${tc.color};border-color:${tc.border}">
+                ${memberIds.length}
+              </span>
+            </div>
+            <div class="mnv2-mm-list" id="mnv2-mm-current">${membersHtml}</div>
+          </div>
+          ${isAdmin ? `
+          <div class="mnv2-mm-col">
+            <div class="mnv2-mm-col-header">
+              <span class="mnv2-mm-col-title">Agregar persona</span>
+            </div>
+            <div class="mnv2-mm-search-wrap">
+              <span class="mnv2-mm-search-icon">${IC.search}</span>
+              <input class="mnv2-mm-search-input" id="mnv2-mm-search"
+                placeholder="Buscar persona..." value="${H.escape(addQuery)}">
+            </div>
+            <div class="mnv2-mm-list" id="mnv2-mm-add">${addHtml}</div>
+          </div>` : ''}
+        </div>`;
+    }
+
+    Modal.open({
+      title: `${tc.icon} ${H.escape(ministry.name)} — Integrantes`,
+      size: 'lg',
+      body: _buildBody(),
+      footer: `<button class="btn btn-ghost" onclick="Modal.close()">Cerrar</button>`,
+    });
+
+    // Wiring delegado en el body del modal
+    setTimeout(() => {
+      const overlay = document.getElementById('modal-overlay');
+      if (!overlay) return;
+
+      // Buscador add
+      overlay.querySelector('#mnv2-mm-search')?.addEventListener('input', e => {
+        addQuery = e.target.value.toLowerCase().trim();
+        Modal.setBody(_buildBody());
+        // Re-wiring tras setBody
+        setTimeout(() => _wireModalEvents(overlay, ministry, memberIds, tc, _buildBody), 10);
+      });
+
+      _wireModalEvents(overlay, ministry, memberIds, tc, _buildBody);
+    }, 80);
+  }
+
+  function _wireModalEvents(overlay, ministry, memberIds, tc, rebuildFn) {
+    // Quitar miembro
+    overlay.querySelectorAll('.mnv2-mm-remove-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const pid = btn.dataset.pid;
+        btn.disabled = true;
+        try {
+          await API.removeMinistryMember(ministry.id, pid);
+          memberIds.splice(memberIds.indexOf(pid), 1);
+          ministry.memberIds = [...memberIds];
+          // Actualizar _all local
+          const idx = _all.findIndex(m => m.id === ministry.id);
+          if (idx > -1) _all[idx].memberIds = [...memberIds];
+          Toast.success('Integrante quitado');
+          Modal.setBody(rebuildFn());
+          setTimeout(() => _wireModalEvents(overlay, ministry, memberIds, tc, rebuildFn), 10);
+        } catch (e) { Toast.error(e.message); btn.disabled = false; }
+      });
+    });
+
+    // Agregar miembro
+    overlay.querySelectorAll('.mnv2-mm-add-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const pid = btn.dataset.pid;
+        btn.disabled = true;
+        try {
+          await API.addMinistryMember(ministry.id, pid);
+          memberIds.push(pid);
+          ministry.memberIds = [...memberIds];
+          const idx = _all.findIndex(m => m.id === ministry.id);
+          if (idx > -1) _all[idx].memberIds = [...memberIds];
+          Toast.success('Integrante agregado');
+          Modal.setBody(rebuildFn());
+          setTimeout(() => _wireModalEvents(overlay, ministry, memberIds, tc, rebuildFn), 10);
+        } catch (e) { Toast.error(e.message); btn.disabled = false; }
+      });
+    });
+
+    // Re-search input
+    overlay.querySelector('#mnv2-mm-search')?.addEventListener('input', e => {
+      // ya manejado arriba, pero por si se re-renderiza
+    });
+  }
+
+  // ── Modal Crear / Editar ─────────────────────────────────
+
+  async function openModal(m) {
+    const isEdit = !!(m && m.id);
+    const tc = m ? _tc(m.type) : _tc('otro');
+
+    const typePickerHtml = Object.entries(TYPE_CFG).map(([key, cfg]) => `
+      <button class="mnv2-type-pick-btn${m?.type === key ? ' active' : ''}"
+        data-type="${key}"
+        style="${m?.type === key
+          ? `background:${cfg.color};color:#fff;border-color:${cfg.color};box-shadow:0 3px 10px ${cfg.color}44`
+          : `background:${cfg.bg};color:${cfg.color};border-color:${cfg.border}`}">
+        <span style="font-size:18px;line-height:1">${cfg.icon}</span>
+        <span style="font-size:11px;font-weight:700">${cfg.label}</span>
+      </button>`).join('');
+
+    Modal.open({
+      title: isEdit ? `Editar — ${H.escape(m.name)}` : 'Nuevo Ministerio',
+      size:  'lg',
+      body: `
+        ${isEdit ? `
+          <div class="mnv2-modal-header" style="border-color:${tc.border}">
+            <div class="mnv2-type-icon" style="width:46px;height:46px;font-size:22px;background:${tc.bg};color:${tc.color};border-color:${tc.border}">${tc.icon}</div>
+            <div>
+              <div style="font-size:15px;font-weight:700;color:var(--text-primary)">${H.escape(m.name)}</div>
+              <div style="font-size:12px;color:${tc.color};font-weight:600">${tc.label}</div>
+            </div>
+          </div>` : ''}
+
+        <div class="form-group">
+          <label class="form-label">Tipo de Ministerio *</label>
+          <div class="mnv2-type-picker" id="mnv2-type-picker">${typePickerHtml}</div>
+          <input type="hidden" id="mi-type" value="${H.escape(m?.type || '')}">
+        </div>
+
+        <div class="form-row form-row-2">
+          <div class="form-group">
+            <label class="form-label">Nombre *</label>
+            <input class="form-input" id="mi-name" value="${H.escape(m?.name || '')}"
+              placeholder="Ej: Ministerio de Alabanza">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Líderes</label>
+            <input class="form-input" id="mi-leaders" value="${H.escape(m?.leaders || '')}"
+              placeholder="Nombre1, Nombre2">
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Descripción</label>
+          <textarea class="form-textarea" id="mi-desc" placeholder="Descripción del ministerio...">${H.escape(m?.description || '')}</textarea>
+        </div>
+
+        <div class="form-row form-row-2">
+          <div class="form-group">
+            <label class="form-label">Días y Horarios</label>
+            <input class="form-input" id="mi-sched" value="${H.escape(m?.schedule || '')}"
+              placeholder="Ej: Viernes 20:00">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Lugar</label>
+            <input class="form-input" id="mi-loc" value="${H.escape(m?.location || '')}"
+              placeholder="Salón principal">
+          </div>
+        </div>
+
+        <div id="mi-msg"></div>`,
+      footer: `
+        <button class="btn btn-ghost" onclick="Modal.close()">Cancelar</button>
+        ${isEdit ? `
+          <button class="btn btn-danger" style="margin-right:auto"
+            onclick="MinistriesModule.deleteMinistry('${m.id}','${H.escape(m.name)}')">
+            Eliminar
+          </button>` : ''}
+        <button class="btn btn-primary" id="mi-save-btn"
+          onclick="MinistriesModule._submit('${m?.id || ''}')">
+          ${isEdit ? 'Guardar cambios' : '＋ Crear Ministerio'}
+        </button>`,
+    });
+
+    // Wiring del type picker visual
+    setTimeout(() => {
+      const picker = document.getElementById('mnv2-type-picker');
+      const hiddenInput = document.getElementById('mi-type');
+      if (!picker || !hiddenInput) return;
+
+      picker.querySelectorAll('.mnv2-type-pick-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const type = btn.dataset.type;
+          const cfg  = TYPE_CFG[type];
+          hiddenInput.value = type;
+
+          picker.querySelectorAll('.mnv2-type-pick-btn').forEach(b => {
+            const bc = TYPE_CFG[b.dataset.type];
+            b.classList.remove('active');
+            b.style.cssText = `background:${bc.bg};color:${bc.color};border-color:${bc.border}`;
+          });
+          btn.classList.add('active');
+          btn.style.cssText = `background:${cfg.color};color:#fff;border-color:${cfg.color};box-shadow:0 3px 10px ${cfg.color}44`;
+        });
+      });
+    }, 60);
+  }
+
+  async function _submit(id) {
+    const data = {
+      name:        (document.getElementById('mi-name')?.value || '').trim(),
+      type:         document.getElementById('mi-type')?.value || '',
+      description: (document.getElementById('mi-desc')?.value || '').trim(),
+      leaders:     (document.getElementById('mi-leaders')?.value || '').trim(),
+      schedule:    (document.getElementById('mi-sched')?.value || '').trim(),
+      location:    (document.getElementById('mi-loc')?.value || '').trim(),
+    };
+    if (id) data.id = id;
+
+    const msgEl = document.getElementById('mi-msg');
+    if (!data.name || !data.type) {
+      if (msgEl) msgEl.innerHTML = `<div class="form-msg form-msg-error">Nombre y tipo son requeridos</div>`;
+      return;
+    }
+    const btn = document.getElementById('mi-save-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Guardando…'; }
+    try {
+      await API.saveMinistry(data);
+      Modal.close();
+      Toast.success(id ? 'Ministerio actualizado' : 'Ministerio creado');
+      await render();
+    } catch (e) {
+      if (msgEl) msgEl.innerHTML = `<div class="form-msg form-msg-error">${H.escape(e.message)}</div>`;
+      if (btn) { btn.disabled = false; btn.textContent = id ? 'Guardar cambios' : '＋ Crear Ministerio'; }
+    }
+  }
+
+  async function deleteMinistry(id, name) {
+    const ok = await Modal.confirm({
+      title:       'Eliminar ministerio',
+      message:     `¿Eliminar <strong>${H.escape(name)}</strong>? Se desvinculará a todos sus integrantes.`,
+      confirmText: 'Eliminar',
+    });
+    if (!ok) return;
+    Modal.close();
+    try {
+      await API.deleteMinistry(id);
+      Toast.success('Ministerio eliminado');
+      await render();
+    } catch (e) { Toast.error(e.message); }
+  }
+
+  return { render, openModal, _submit, deleteMinistry };
+})();
+
+// ═══════════════════════════════════════════════════════════
+// USERS MODULE — Rediseño v2
+// ═══════════════════════════════════════════════════════════
+const UsersModule = (() => {
+
+  let _all      = [];
+  let _churches = [];
+  let _query    = '';
+  let _roleFilter = 'all'; // 'all' | 'admin' | 'secretary' | 'maestro'
+
+  // ── Configuración de roles ──────────────────────────────
+
+  const ROLES_CFG = {
+    admin:     { label: 'Administrador', color: '#7C3AED', bg: '#F5F3FF', border: '#EDE9FE', icon: '⚙' },
+    secretary: { label: 'Secretario/a',  color: '#1D4ED8', bg: '#EFF6FF', border: '#BFDBFE', icon: '✎' },
+    maestro:   { label: 'Maestro/a',     color: '#92400E', bg: '#FFFBEB', border: '#FDE68A', icon: '📖' },
+  };
+
+  const GRADES_ICONS = {
+    escuelaVida:   '📖',
+    consolidacion: '🌱',
+    obreros1:      '⚒',
+    obreros2:      '🏛',
+  };
+
+  // ── Carga ───────────────────────────────────────────────
+
+  async function render() {
+    const sect = document.getElementById('sect-users');
+    if (!sect) return;
+    sect.innerHTML = `<div class="sect-loading"><div class="spinner"></div></div>`;
+    try {
+      [_all, _churches] = await Promise.all([
+        API.getUsers(),
+        API.getChurches().catch(() => []),
+      ]);
+      sect.innerHTML = '';
+      sect.appendChild(_buildPage());
+    } catch (e) {
+      sect.innerHTML = _renderError(e.message);
+    }
+  }
+
+  // ── Helpers ─────────────────────────────────────────────
+
+  function _churchName(churchId) {
+    return _churches.find(c => c.id === churchId)?.name || null;
+  }
+
+  function _isActive(u) {
+    return u.status !== 'inactive' && u.status !== 'blocked' && !u.deleted;
+  }
+
+  function _isMe(u) {
+    return u.id === APP.user?.id;
+  }
+
+  function _initials(name) {
+    if (!name) return '?';
+    return name.trim().split(/\s+/).slice(0, 2).map(w => w[0].toUpperCase()).join('');
+  }
+
+  // ── Construcción de la página ────────────────────────────
+
+  function _buildPage() {
+    const byRole = {
+      admin:     _all.filter(u => u.role === 'admin').length,
+      secretary: _all.filter(u => u.role === 'secretary').length,
+      maestro:   _all.filter(u => u.role === 'maestro').length,
+    };
+    const active   = _all.filter(u => _isActive(u)).length;
+    const inactive = _all.length - active;
+
+    const wrap = document.createElement('div');
+    wrap.className = 'usv2-page';
+
+    // ── Hero
+    wrap.innerHTML = `
+      <div class="usv2-hero">
+        <div class="usv2-hero-band"></div>
+        <div class="usv2-hero-body">
+          <div class="usv2-hero-left">
+            <div class="usv2-hero-icon">${IC.users}</div>
+            <div>
+              <div class="usv2-hero-eyebrow">Control de acceso</div>
+              <h1 class="usv2-hero-title">Usuarios</h1>
+            </div>
+          </div>
+          <div class="usv2-hero-right">
+            <div class="usv2-stats">
+              <div class="usv2-stat">
+                <span class="usv2-stat-val" style="color:#1A5FD4">${_all.length}</span>
+                <span class="usv2-stat-lbl">total</span>
+              </div>
+              <div class="usv2-stat-sep"></div>
+              <div class="usv2-stat">
+                <span class="usv2-stat-val" style="color:#7C3AED">${byRole.admin}</span>
+                <span class="usv2-stat-lbl">admins</span>
+              </div>
+              <div class="usv2-stat-sep"></div>
+              <div class="usv2-stat">
+                <span class="usv2-stat-val" style="color:#1D4ED8">${byRole.secretary}</span>
+                <span class="usv2-stat-lbl">secretarios</span>
+              </div>
+              <div class="usv2-stat-sep"></div>
+              <div class="usv2-stat">
+                <span class="usv2-stat-val" style="color:#92400E">${byRole.maestro}</span>
+                <span class="usv2-stat-lbl">maestros</span>
+              </div>
+              <div class="usv2-stat-sep"></div>
+              <div class="usv2-stat">
+                <span class="usv2-stat-val" style="color:#16A34A">${active}</span>
+                <span class="usv2-stat-lbl">activos</span>
+              </div>
+              ${inactive > 0 ? `
+              <div class="usv2-stat-sep"></div>
+              <div class="usv2-stat">
+                <span class="usv2-stat-val" style="color:#94A3B8">${inactive}</span>
+                <span class="usv2-stat-lbl">inactivos</span>
+              </div>` : ''}
+            </div>
+            <button class="btn btn-primary usv2-new-btn" id="usv2-new-btn">＋ Nuevo Usuario</button>
+          </div>
+        </div>
+      </div>`;
+
+    // ── Toolbar
+    const toolbar = document.createElement('div');
+    toolbar.className = 'usv2-toolbar';
+
+    // Buscador
+    const searchWrap = document.createElement('div');
+    searchWrap.className = 'usv2-search';
+    searchWrap.innerHTML = `<span class="usv2-search-icon">${IC.search}</span>`;
+    const searchInput = document.createElement('input');
+    searchInput.className = 'usv2-search-input';
+    searchInput.placeholder = 'Buscar nombre, usuario, email...';
+    searchInput.value = _query;
+    searchInput.addEventListener('input', e => {
+      _query = e.target.value.toLowerCase().trim();
+      _repaint(listEl);
+    });
+    searchWrap.appendChild(searchInput);
+
+    // Pills de rol
+    const pillsWrap = document.createElement('div');
+    pillsWrap.className = 'usv2-pills';
+
+    const pillDefs = [
+      { val: 'all',       label: 'Todos',          icon: '👥' },
+      { val: 'admin',     label: 'Administradores', icon: '⚙' },
+      { val: 'secretary', label: 'Secretarios',     icon: '✎' },
+      { val: 'maestro',   label: 'Maestros',        icon: '📖' },
+    ];
+
+    pillDefs.forEach(p => {
+      const btn = document.createElement('button');
+      btn.className = 'usv2-pill' + (_roleFilter === p.val ? ' active' : '');
+      btn.dataset.val = p.val;
+      btn.innerHTML = `${p.icon} ${p.label}`;
+      if (_roleFilter === p.val && p.val !== 'all') {
+        const rc = ROLES_CFG[p.val];
+        btn.style.cssText = `background:${rc.bg};color:${rc.color};border-color:${rc.border}`;
+      }
+      btn.addEventListener('click', () => {
+        _roleFilter = p.val;
+        pillsWrap.querySelectorAll('.usv2-pill').forEach(b => {
+          b.classList.remove('active');
+          b.style.cssText = '';
+        });
+        btn.classList.add('active');
+        if (p.val !== 'all') {
+          const rc = ROLES_CFG[p.val];
+          btn.style.cssText = `background:${rc.bg};color:${rc.color};border-color:${rc.border}`;
+        }
+        _repaint(listEl);
+      });
+      pillsWrap.appendChild(btn);
+    });
+
+    toolbar.appendChild(searchWrap);
+    toolbar.appendChild(pillsWrap);
+    wrap.appendChild(toolbar);
+
+    // ── Lista de usuarios
+    const listEl = document.createElement('div');
+    listEl.className = 'usv2-list';
+    _repaint(listEl);
+    wrap.appendChild(listEl);
+
+    // Wiring
+    wrap.querySelector('#usv2-new-btn')?.addEventListener('click', () => openModal());
+
+    return wrap;
+  }
+
+  // ── Render de la lista ──────────────────────────────────
+
+  function _repaint(container) {
+    container.innerHTML = '';
+
+    let list = [..._all];
+
+    if (_roleFilter !== 'all') {
+      list = list.filter(u => u.role === _roleFilter);
+    }
+    if (_query) {
+      list = list.filter(u =>
+        H.matches(u.name,     _query) ||
+        H.matches(u.username, _query) ||
+        H.matches(u.email,    _query) ||
+        H.matches(u.role,     _query)
+      );
+    }
+
+    if (!list.length) {
+      container.innerHTML = `
+        <div class="usv2-empty">
+          <div class="usv2-empty-icon">${IC.users}</div>
+          <div class="usv2-empty-title">${_query || _roleFilter !== 'all' ? 'Sin resultados' : 'No hay usuarios'}</div>
+          <div class="usv2-empty-sub">${_query || _roleFilter !== 'all' ? 'Probá con otro filtro.' : 'Creá el primer usuario del sistema.'}</div>
+        </div>`;
+      return;
+    }
+
+    // Agrupar: yo primero, luego admins, secretarios, maestros
+    const sorted = [...list].sort((a, b) => {
+      if (_isMe(a)) return -1;
+      if (_isMe(b)) return  1;
+      const order = { admin: 0, secretary: 1, maestro: 2 };
+      return (order[a.role] ?? 3) - (order[b.role] ?? 3);
+    });
+
+    sorted.forEach(user => container.appendChild(_renderRow(user)));
+  }
+
+  function _renderRow(user) {
+    const rc      = ROLES_CFG[user.role] || { label: user.role, color: '#64748B', bg: '#F1F5F9', border: '#E2E8F0', icon: '?' };
+    const active  = _isActive(user);
+    const isMe    = _isMe(user);
+    const church  = _churchName(user.churchId);
+    const grade   = user.assignedGrade ? CONFIG.GRADES[user.assignedGrade] : null;
+    const gradeIcon = user.assignedGrade ? (GRADES_ICONS[user.assignedGrade] || '') : '';
+
+    const row = document.createElement('div');
+    row.className = `usv2-row${!active ? ' usv2-row-inactive' : ''}${isMe ? ' usv2-row-me' : ''}`;
+
+    // Avatar
+    const avWrap = document.createElement('div');
+    avWrap.className = 'usv2-av-wrap';
+    const av = document.createElement('div');
+    av.className = 'usv2-av';
+    av.style.cssText = `background:${rc.color}20;color:${rc.color}`;
+    if (user.photoUrl) {
+      av.innerHTML = `<img src="${H.escape(user.photoUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:50%">`;
+    } else {
+      av.textContent = _initials(user.name || user.username);
+    }
+    const statusDot = document.createElement('div');
+    statusDot.className = 'usv2-av-dot';
+    statusDot.style.background = active ? '#22C55E' : '#94A3B8';
+    statusDot.title = active ? 'Activo' : 'Inactivo';
+    avWrap.appendChild(av);
+    avWrap.appendChild(statusDot);
+
+    // Info principal
+    const info = document.createElement('div');
+    info.className = 'usv2-info';
+    info.innerHTML = `
+      <div class="usv2-name-row">
+        <span class="usv2-name">${H.escape(user.name || user.username)}</span>
+        ${isMe ? `<span class="usv2-me-badge">Tú</span>` : ''}
+      </div>
+      <div class="usv2-meta-row">
+        <span class="usv2-username">@${H.escape(user.username)}</span>
+        ${user.email ? `<span class="usv2-sep">·</span><span class="usv2-email">${H.escape(user.email)}</span>` : ''}
+      </div>`;
+
+    // Badges del centro
+    const badges = document.createElement('div');
+    badges.className = 'usv2-badges';
+    badges.innerHTML = `
+      <span class="usv2-role-badge" style="background:${rc.bg};color:${rc.color};border-color:${rc.border}">
+        ${rc.icon} ${rc.label}
+      </span>
+      ${grade ? `
+        <span class="usv2-grade-badge">
+          ${gradeIcon} ${grade.label}
+        </span>` : ''}
+      ${church ? `
+        <span class="usv2-church-badge">
+          🏛 ${H.escape(church)}
+        </span>` : ''}`;
+
+    // Acciones
+    const actions = document.createElement('div');
+    actions.className = 'usv2-actions';
+
+    const btnEdit = document.createElement('button');
+    btnEdit.className = 'usv2-act-btn usv2-act-edit';
+    btnEdit.title = 'Editar usuario';
+    btnEdit.innerHTML = IC.edit;
+    btnEdit.addEventListener('click', () => openModal(user));
+    actions.appendChild(btnEdit);
+
+    if (!isMe) {
+      const btnToggle = document.createElement('button');
+      btnToggle.className = `usv2-act-btn ${active ? 'usv2-act-deactivate' : 'usv2-act-activate'}`;
+      btnToggle.title = active ? 'Desactivar' : 'Activar';
+      btnToggle.innerHTML = active ? IC.eyeOff || IC.eye : IC.check;
+      btnToggle.addEventListener('click', () => _toggleActive(user.id, active, user.name || user.username));
+      actions.appendChild(btnToggle);
+
+      const btnDel = document.createElement('button');
+      btnDel.className = 'usv2-act-btn usv2-act-delete';
+      btnDel.title = 'Eliminar usuario';
+      btnDel.innerHTML = IC.trash;
+      btnDel.addEventListener('click', () => deleteUser(user.id, user.name || user.username));
+      actions.appendChild(btnDel);
+    }
+
+    row.appendChild(avWrap);
+    row.appendChild(info);
+    row.appendChild(badges);
+    row.appendChild(actions);
+
+    return row;
+  }
+
+  // ── Modal Crear / Editar ─────────────────────────────────
+
+  async function openModal(u) {
+    const isEdit   = !!(u && u.id);
+    const churches = await API.getChurches().catch(() => []);
+    const rc       = u ? (ROLES_CFG[u.role] || {}) : {};
+
+    const roleOpts = [
+      { v: 'admin',     l: 'Administrador' },
+      { v: 'secretary', l: 'Secretario/a'  },
+      { v: 'maestro',   l: 'Maestro/a'     },
+    ].map(r => `<option value="${r.v}" ${u?.role === r.v ? 'selected' : ''}>${r.l}</option>`).join('');
+
+    const gradeOpts = CONFIG.GRADE_KEYS
+      .map(k => `<option value="${k}" ${u?.assignedGrade === k ? 'selected' : ''}>${CONFIG.GRADES[k].label}</option>`)
+      .join('');
+
+    const chOpts = churches
+      .map(c => `<option value="${c.id}" ${u?.churchId === c.id ? 'selected' : ''}>${H.escape(c.name)}</option>`)
+      .join('');
+
+    Modal.open({
+      title: isEdit ? `Editar — ${H.escape(u.name || u.username)}` : 'Nuevo Usuario',
+      size: 'md',
+      body: `
+        ${isEdit ? `
+        <div class="usv2-modal-user-header" style="border-color:${rc.border||'var(--border-soft)'}">
+          <div class="usv2-av" style="width:48px;height:48px;font-size:16px;background:${rc.color ? rc.color+'20' : 'var(--bg-subtle)'};color:${rc.color||'var(--text-muted)'}">
+            ${u.photoUrl ? `<img src="${H.escape(u.photoUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:50%">` : _initials(u.name || u.username)}
+          </div>
+          <div>
+            <div style="font-size:15px;font-weight:700;color:var(--text-primary)">${H.escape(u.name || u.username)}</div>
+            <div style="font-size:12px;color:var(--text-muted)">@${H.escape(u.username)} · <span style="color:${rc.color||'var(--text-muted)'}">${rc.label || u.role}</span></div>
+          </div>
+        </div>` : ''}
+
+        <div class="form-row form-row-2">
+          <div class="form-group">
+            <label class="form-label">Nombre completo *</label>
+            <input class="form-input" id="u-name" value="${H.escape(u?.name || '')}" placeholder="Nombre Apellido">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Nombre de usuario *</label>
+            <input class="form-input" id="u-user" value="${H.escape(u?.username || '')}" autocomplete="off" placeholder="sin espacios">
+          </div>
+        </div>
+
+        <div class="form-row form-row-2">
+          <div class="form-group">
+            <label class="form-label">Email</label>
+            <input class="form-input" id="u-email" type="email" value="${H.escape(u?.email || '')}" placeholder="correo@ejemplo.com">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Contraseña ${isEdit ? '(vacío = sin cambios)' : '*'}</label>
+            <input class="form-input" id="u-pass" type="password" autocomplete="new-password" placeholder="${isEdit ? '••••••••' : 'Mín. 6 caracteres'}">
+          </div>
+        </div>
+
+        <div class="form-row form-row-3">
+          <div class="form-group">
+            <label class="form-label">Rol *</label>
+            <select class="form-select" id="u-role" onchange="UsersModule._onRoleChange(this.value)">
+              ${roleOpts}
+            </select>
+          </div>
+          <div class="form-group" id="u-grade-group">
+            <label class="form-label">Grado asignado</label>
+            <select class="form-select" id="u-grade">
+              <option value="">Todos los grados</option>
+              ${gradeOpts}
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Nexo</label>
+            <select class="form-select" id="u-church">
+              <option value="">Sin nexo</option>
+              ${chOpts}
+            </select>
+          </div>
+        </div>
+
+        <div id="u-msg"></div>`,
+      footer: `
+        <button class="btn btn-ghost" onclick="Modal.close()">Cancelar</button>
+        ${isEdit && !_isMe(u) ? `
+          <button class="btn btn-danger" style="margin-right:auto"
+            onclick="UsersModule.deleteUser('${u.id}','${H.escape(u.name || u.username)}')">
+            Eliminar
+          </button>` : ''}
+        <button class="btn btn-primary" onclick="UsersModule._submit('${u?.id || ''}')">
+          ${isEdit ? 'Guardar cambios' : 'Crear usuario'}
+        </button>`,
+    });
+
+    // Mostrar/ocultar campo de grado según el rol inicial
+    setTimeout(() => _onRoleChange(u?.role || 'admin'), 50);
+  }
+
+  function _onRoleChange(role) {
+    const gradeGroup = document.getElementById('u-grade-group');
+    if (!gradeGroup) return;
+    // Grado asignado solo aplica a secretary y maestro
+    gradeGroup.style.display = (role === 'secretary' || role === 'maestro') ? '' : 'none';
+  }
+
+  async function _submit(id) {
+    const data = {
+      name:          (document.getElementById('u-name')?.value || '').trim(),
+      username:      (document.getElementById('u-user')?.value || '').trim(),
+      email:         (document.getElementById('u-email')?.value || '').trim(),
+      password:       document.getElementById('u-pass')?.value || '',
+      role:           document.getElementById('u-role')?.value || '',
+      assignedGrade:  document.getElementById('u-grade')?.value || '',
+      churchId:       document.getElementById('u-church')?.value || '',
+    };
+    if (id) data.id = id;
+
+    const msgEl = document.getElementById('u-msg');
+
+    if (!data.name || !data.username || !data.role) {
+      if (msgEl) msgEl.innerHTML = `<div class="form-msg form-msg-error">Nombre, usuario y rol son requeridos</div>`;
+      return;
+    }
+    if (!id && !data.password) {
+      if (msgEl) msgEl.innerHTML = `<div class="form-msg form-msg-error">La contraseña es requerida al crear un usuario</div>`;
+      return;
+    }
+
+    const btn = document.querySelector('#modal-overlay .btn-primary');
+    if (btn) { btn.disabled = true; btn.textContent = 'Guardando…'; }
+
+    try {
+      await API.saveUser(data);
+      Modal.close();
+      Toast.success(id ? 'Usuario actualizado' : 'Usuario creado');
+      await render();
+    } catch (e) {
+      if (msgEl) msgEl.innerHTML = `<div class="form-msg form-msg-error">${H.escape(e.message)}</div>`;
+      if (btn) { btn.disabled = false; btn.textContent = id ? 'Guardar cambios' : 'Crear usuario'; }
+    }
+  }
+
+  async function _toggleActive(id, currentlyActive, name) {
+    const ok = await Modal.confirm({
+      title:       `${currentlyActive ? 'Desactivar' : 'Activar'} usuario`,
+      message:     `¿${currentlyActive ? 'Desactivar' : 'Activar'} la cuenta de <strong>${H.escape(name)}</strong>?
+                   ${currentlyActive ? 'No podrá iniciar sesión.' : 'Podrá volver a iniciar sesión.'}`,
+      confirmText:  currentlyActive ? 'Desactivar' : 'Activar',
+    });
+    if (!ok) return;
+    try {
+      await API.saveUser({ id, status: currentlyActive ? 'inactive' : 'active' });
+      Toast.success(`Usuario ${currentlyActive ? 'desactivado' : 'activado'}`);
+      await render();
+    } catch (e) { Toast.error(e.message); }
+  }
+
+  async function deleteUser(id, name) {
+    const ok = await Modal.confirm({
+      title:       'Eliminar usuario',
+      message:     `¿Eliminar permanentemente la cuenta de <strong>${H.escape(name)}</strong>? Esta acción no se puede deshacer.`,
+      confirmText: 'Eliminar',
+    });
+    if (!ok) return;
+    Modal.close();
+    try {
+      await API.deleteUser(id);
+      Toast.success('Usuario eliminado');
+      await render();
+    } catch (e) { Toast.error(e.message); }
+  }
+
+  return { render, openModal, _submit, _toggleActive, deleteUser, _onRoleChange };
+})();
+
+// ═══════════════════════════════════════════════════════════
+// AUDIT MODULE
+// ═══════════════════════════════════════════════════════════
+const AuditModule = (() => {
+  let _all = [], _filtered = [], _page = 1;
+  const PAGE = 20;
+  let _searchFn;
+
+  async function render() {
+    const el = document.getElementById('sect-audit');
+    if (!el) return;
+    el.innerHTML = `<div class="sect-loading"><div class="spinner"></div></div>`;
+    try {
+      _all = await API.getAuditLog({ limit: 500 });
+      _filtered = [..._all]; _page = 1;
+      el.innerHTML = _buildShell();
+      _searchFn = H.debounce(q => { _onSearch(q); }, 300);
+      _renderTable();
+    } catch (e) { el.innerHTML = _renderError(e.message); }
+  }
+
+  function _buildShell() {
+    const entities = [...new Set(_all.map(r => r.entity).filter(Boolean))].sort();
+    const entOpts  = entities.map(e => `<option value="${e}">${e}</option>`).join('');
+    return `
+      <div class="sect-hero">
+        <div class="sect-hero-left">
+          <div class="sect-hero-icon">${IC.audit}</div>
+          <div class="sect-hero-text"><div class="sect-hero-eyebrow">Seguridad</div>
+            <div class="sect-hero-title">Auditoría</div><div class="sect-hero-sub">Registro de actividad del sistema</div></div>
+        </div>
+        <div class="sect-hero-right">
+          <div class="sect-metric"><div class="sect-metric-val" id="aud-total">${_all.length}</div><div class="sect-metric-label">Eventos</div></div>
+        </div>
+      </div>
+      <div class="sect-toolbar">
+        <div class="search-wrap">${IC.search}<input class="search-input" id="aud-search" placeholder="Buscar por usuario, acción…" oninput="_searchFn(this.value)"></div>
+        <select class="form-select" id="aud-entity" onchange="AuditModule._onFilter()" style="width:160px;padding:8px 12px">
+          <option value="">Todas las entidades</option>${entOpts}
+        </select>
+        <select class="form-select" id="aud-action" onchange="AuditModule._onFilter()" style="width:140px;padding:8px 12px">
+          <option value="">Todas las acciones</option>
+          ${['CREATE','UPDATE','DELETE','LOGIN','ENROLL','BAJA','STATUS_CHANGE','CHANGE_PASSWORD'].map(a=>`<option value="${a}">${a}</option>`).join('')}
+        </select>
+      </div>
+      <div id="aud-table"></div>
+      <div id="aud-pagination"></div>`;
+  }
+
+  function _onSearch(q) {
+    _applyFilters(q);
+  }
+
+  function _onFilter() {
+    const q = document.getElementById('aud-search')?.value || '';
+    _applyFilters(q);
+  }
+
+  function _applyFilters(q) {
+    const entity = document.getElementById('aud-entity')?.value || '';
+    const action = document.getElementById('aud-action')?.value || '';
+    _filtered = _all.filter(r => {
+      if (entity && r.entity !== entity) return false;
+      if (action && r.action !== action) return false;
+      if (q) return H.matches(r.userName, q) || H.matches(r.action, q) || H.matches(r.entity, q) || H.matches(r.meta, q);
+      return true;
+    });
+    _page = 1;
+    _renderTable();
+    const tot = document.getElementById('aud-total');
+    if (tot) tot.textContent = _filtered.length;
+  }
+
+  function _renderTable() {
+    const tEl  = document.getElementById('aud-table');
+    const pEl  = document.getElementById('aud-pagination');
+    if (!tEl) return;
+    const pag  = H.paginate(_filtered, _page, PAGE);
+
+    const actionBadge = a => {
+      const m = { CREATE:'badge-green', UPDATE:'badge-blue', DELETE:'badge-red', LOGIN:'badge-teal',
+                  ENROLL:'badge-green', BAJA:'badge-gray', STATUS_CHANGE:'badge-amber', CHANGE_PASSWORD:'badge-purple' };
+      return `<span class="badge ${m[a]||'badge-gray'}">${a}</span>`;
+    };
+
+    tEl.innerHTML = pag.rows.length ? `
+      <div class="table-wrap"><table class="table">
+        <thead><tr><th>Fecha y hora</th><th>Entidad</th><th>Acción</th><th>Usuario</th><th>Detalle</th></tr></thead>
+        <tbody>${pag.rows.map(r => `
+          <tr>
+            <td class="text-sm text-muted" style="white-space:nowrap">${H.date(r.timestamp)} ${r.timestamp ? new Date(r.timestamp).toLocaleTimeString('es-AR',{hour:'2-digit',minute:'2-digit'}) : ''}</td>
+            <td><span class="badge badge-gray">${H.escape(r.entity||'—')}</span></td>
+            <td>${actionBadge(r.action||'')}</td>
+            <td><div class="person-name" style="font-size:12px">${H.escape(r.userName||'Sistema')}</div>
+                <div class="person-sub">${H.escape(r.userRole||'')}</div></td>
+            <td class="text-sm text-muted">${H.truncate(r.meta||'', 60)}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table></div>` : `<div class="table-empty"><div class="table-empty-icon">${IC.audit}</div>Sin registros</div>`;
+
+    if (pEl) pEl.innerHTML = _renderPagination(pag, 'AuditModule._goPage');
+  }
+
+  function _goPage(p) { _page = p; _renderTable(); }
+
+  return { render, _onSearch, _onFilter, _goPage };
+})();
+
+// ═══════════════════════════════════════════════════════════
+// CONFIG MODULE
+// ═══════════════════════════════════════════════════════════
+const ConfigModule = (() => {
+
+  async function render() {
+    const el = document.getElementById('sect-config');
+    if (!el) return;
+    const user  = APP.user || {};
+    const periods = await API.getPeriods().catch(() => []);
+
+    el.innerHTML = `
+      <div class="sect-hero">
+        <div class="sect-hero-left">
+          <div class="sect-hero-icon">${IC.config}</div>
+          <div class="sect-hero-text"><div class="sect-hero-eyebrow">Sistema</div>
+            <div class="sect-hero-title">Configuración</div><div class="sect-hero-sub">Períodos académicos y preferencias</div></div>
+        </div>
+      </div>
+      <div style="padding:24px;display:grid;gap:24px;max-width:800px">
+
+        <!-- Perfil -->
+        <div class="config-card">
+          <div class="config-card-title">${IC.user} Mi perfil</div>
+          <div class="config-profile">
+            <div class="person-avatar" style="width:56px;height:56px;font-size:18px">
+              ${user.photoUrl ? `<img src="${H.escape(user.photoUrl)}">` : H.initials(user.name)}
+            </div>
+            <div>
+              <div class="person-name" style="font-size:15px">${H.escape(user.name||'')}</div>
+              <div class="person-sub">@${H.escape(user.username||'')} · ${user.role||''}</div>
+              <div class="person-sub">${H.escape(user.email||'')}</div>
+            </div>
+          </div>
+          <button class="btn btn-ghost btn-sm" style="margin-top:12px" onclick="ProfileMenu.showChangePassword()">${IC.key} Cambiar contraseña</button>
+        </div>
+
+        <!-- Períodos académicos -->
+        ${user.role === 'admin' ? `
+        <div class="config-card">
+          <div class="config-card-title" style="display:flex;justify-content:space-between;align-items:center">
+            <span>${IC.calendar} Períodos académicos</span>
+            <button class="btn btn-primary btn-sm" onclick="ConfigModule.openPeriodModal()">${IC.add} Nuevo período</button>
+          </div>
+          <div class="table-wrap" style="margin-top:12px">
+            <table class="table">
+              <thead><tr><th>Nombre</th><th>Año</th><th>Semestre</th><th>Fechas</th><th>Estado</th><th></th></tr></thead>
+              <tbody>${periods.map(p => `
+                <tr>
+                  <td class="person-name">${H.escape(p.name)}</td>
+                  <td>${p.year}</td>
+                  <td>${p.semester}°</td>
+                  <td class="text-sm text-muted">${H.date(p.startDate)} — ${H.date(p.endDate)}</td>
+                  <td><span class="badge ${p.status==='active'||p.status==='activo'?'badge-green':'badge-gray'}">${p.status==='active'||p.status==='activo'?'Activo':'Cerrado'}</span></td>
+                  <td><button class="btn btn-icon btn-ghost btn-sm" onclick="ConfigModule.openPeriodModal(${JSON.stringify(p)})">${IC.edit}</button></td>
+                </tr>`).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Caché -->
+        <div class="config-card">
+          <div class="config-card-title">${IC.refresh} Caché del sistema</div>
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">Limpia el caché del servidor para forzar la recarga de datos frescos.</p>
+          <button class="btn btn-ghost" onclick="ConfigModule.clearCache()">${IC.refresh} Limpiar caché del servidor</button>
+        </div>` : ''}
+
+      </div>`;
+  }
+
+  async function openPeriodModal(p) {
+    const isEdit = !!(p && p.id);
+    Modal.open({
+      title: isEdit ? 'Editar período' : 'Nuevo período', size: 'md',
+      body: `
+        <div class="form-group"><label class="form-label">Nombre *</label><input class="form-input" id="per-name" value="${H.escape(p?.name||'')}" placeholder="2025 — Cuatrimestre 1"></div>
+        <div class="form-row form-row-3">
+          <div class="form-group"><label class="form-label">Año *</label><input class="form-input" id="per-year" type="number" value="${p?.year||new Date().getFullYear()}"></div>
+          <div class="form-group"><label class="form-label">Semestre *</label>
+            <select class="form-select" id="per-sem"><option value="1" ${p?.semester==1?'selected':''}>1°</option><option value="2" ${p?.semester==2?'selected':''}>2°</option></select></div>
+          <div class="form-group"><label class="form-label">Estado</label>
+            <select class="form-select" id="per-status">
+              <option value="active" ${p?.status==='active'||p?.status==='activo'?'selected':''}>Activo</option>
+              <option value="closed" ${p?.status==='closed'||p?.status==='cerrado'?'selected':''}>Cerrado</option>
+            </select></div>
+        </div>
+        <div class="form-row form-row-2">
+          <div class="form-group"><label class="form-label">Inicio *</label><input class="form-input" id="per-start" type="date" value="${H.escape(p?.startDate||'')}"></div>
+          <div class="form-group"><label class="form-label">Fin *</label><input class="form-input" id="per-end" type="date" value="${H.escape(p?.endDate||'')}"></div>
+        </div>
+        <div id="per-msg"></div>`,
+      footer: `<button class="btn btn-ghost" onclick="Modal.close()">Cancelar</button>
+               <button class="btn btn-primary" onclick="ConfigModule._submitPeriod('${p?.id||''}')">
+               ${isEdit ? 'Guardar' : 'Crear período'}</button>`,
+    });
+  }
+
+  async function _submitPeriod(id) {
+    const data = {
+      name: (document.getElementById('per-name')?.value||'').trim(),
+      year: parseInt(document.getElementById('per-year')?.value||0),
+      semester: parseInt(document.getElementById('per-sem')?.value||1),
+      status: document.getElementById('per-status')?.value||'closed',
+      startDate: document.getElementById('per-start')?.value||'',
+      endDate: document.getElementById('per-end')?.value||'',
+    };
+    if (id) data.id = id;
+    const msgEl = document.getElementById('per-msg');
+    if (!data.name || !data.year || !data.startDate || !data.endDate) {
+      if (msgEl) msgEl.innerHTML=`<div class="form-msg form-msg-error">Todos los campos son requeridos</div>`; return;
+    }
+    const btn = document.querySelector('#modal-overlay .btn-primary');
+    if (btn) { btn.disabled=true; btn.textContent='Guardando…'; }
+    try {
+      await API.savePeriod(data); Modal.close(); Toast.success(id?'Período actualizado':'Período creado'); await render();
+    } catch (e) {
+      if (msgEl) msgEl.innerHTML=`<div class="form-msg form-msg-error">${H.escape(e.message)}</div>`;
+      if (btn) { btn.disabled=false; btn.textContent=id?'Guardar':'Crear período'; }
+    }
+  }
+
+  async function clearCache() {
+    const btn = event.currentTarget;
+    if (btn) { btn.disabled=true; btn.textContent='Limpiando…'; }
+    try {
+      await API.clearAllCache();
+      Toast.success('Caché limpiado correctamente');
+    } catch (e) { Toast.error(e.message); }
+    finally { if (btn) { btn.disabled=false; btn.innerHTML=`${IC.refresh} Limpiar caché del servidor`; } }
+  }
+
+  return { render, openPeriodModal, _submitPeriod, clearCache };
+})();
+
+// ═══════════════════════════════════════════════════════════
+// HELPERS COMPARTIDOS (usados por todos los módulos)
+// ═══════════════════════════════════════════════════════════
+
+function _renderError(msg) {
+  return `<div style="padding:48px 24px;text-align:center">
+    <div style="font-size:32px;margin-bottom:12px;opacity:.4">${IC.alert}</div>
+    <div style="font-size:14px;color:var(--red-600)">${H.escape(msg || 'Error al cargar los datos')}</div>
+    <button class="btn btn-ghost btn-sm" style="margin-top:16px" onclick="Shell.refreshCurrentSection()">
+      ${IC.refresh} Reintentar
+    </button>
+  </div>`;
+}
+
+function _renderPagination(pag, fnName) {
+  if (pag.pages <= 1) return '';
+  const info = `${((pag.page-1)*pag.pageSize)+1}–${Math.min(pag.page*pag.pageSize, pag.total)} de ${pag.total}`;
+  let btns = '';
+  // Prev
+  btns += `<button class="page-btn" ${pag.page<=1?'disabled':''} onclick="${fnName}(${pag.page-1})">${IC.chevronLeft}</button>`;
+  // Páginas
+  const range = _pageRange(pag.page, pag.pages);
+  range.forEach(p => {
+    if (p === '…') { btns += `<span class="page-btn" style="cursor:default;border:none">…</span>`; }
+    else { btns += `<button class="page-btn ${p===pag.page?'active':''}" onclick="${fnName}(${p})">${p}</button>`; }
+  });
+  // Next
+  btns += `<button class="page-btn" ${pag.page>=pag.pages?'disabled':''} onclick="${fnName}(${pag.page+1})">${IC.chevronRight}</button>`;
+  return `<div class="pagination"><span class="pagination-info">${info}</span><div class="pagination-btns">${btns}</div></div>`;
+}
+
+function _pageRange(current, total) {
+  if (total <= 7) return Array.from({length:total},(_,i)=>i+1);
+  if (current <= 4) return [1,2,3,4,5,'…',total];
+  if (current >= total-3) return [1,'…',total-4,total-3,total-2,total-1,total];
+  return [1,'…',current-1,current,current+1,'…',total];
+}
+</script>
+
+<!-- Estilos adicionales de módulos -->
+<style>
+/* Dashboard */
+.dash-body    { padding: 24px; }
+.dash-kpis    { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 16px; margin-bottom: 28px; }
+.dash-kpi     { background: var(--bg-surface); border: 1px solid var(--border-soft); border-radius: var(--radius-md); padding: 20px 16px; text-align: center; cursor: pointer; transition: box-shadow .15s; }
+.dash-kpi:hover { box-shadow: var(--shadow-md); }
+.dash-kpi-icon{ display: flex; justify-content: center; margin-bottom: 10px; color: var(--blue-600); }
+.dash-kpi-icon svg { width: 24px; height: 24px; }
+.dash-kpi-val { font-size: 28px; font-weight: 800; color: var(--text-primary); line-height: 1; }
+.dash-kpi-lbl { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+.dash-grades-title { font-size: 13px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
+.dash-grades  { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; margin-bottom: 28px; }
+.dash-grade-card { background: var(--bg-surface); border: 1px solid var(--border-soft); border-radius: var(--radius-md); padding: 16px; cursor: pointer; transition: box-shadow .15s; }
+.dash-grade-card:hover { box-shadow: var(--shadow-md); }
+.dash-grade-header { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
+.dash-grade-label  { font-weight: 600; font-size: 13px; color: var(--text-primary); }
+.dash-grade-stats  { display: flex; gap: 16px; }
+.dash-stat     { text-align: center; }
+.dash-stat-val { font-size: 20px; font-weight: 800; color: var(--text-primary); }
+.dash-stat-lbl { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
+.text-green    { color: var(--green-600); }
+.dash-row      { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px; }
+.dash-card     { background: var(--bg-surface); border: 1px solid var(--border-soft); border-radius: var(--radius-md); padding: 16px; }
+.dash-card-title { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 13px; margin-bottom: 12px; }
+.dash-card-title svg { width: 16px; height: 16px; }
+.dash-risk-row { display: flex; align-items: center; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-soft); }
+.dash-risk-row:last-child { border-bottom: none; }
+
+/* Ministerios - miembros */
+.min-members-wrap  { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+.min-members-list  { display: flex; flex-direction: column; gap: 4px; }
+.min-members-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--text-muted); margin-bottom: 8px; }
+.min-member-row    { display: flex; align-items: center; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border-soft); gap: 8px; }
+.min-member-row:last-child { border-bottom: none; }
+
+/* Config */
+.config-card       { background: var(--bg-surface); border: 1px solid var(--border-soft); border-radius: var(--radius-md); padding: 20px 24px; }
+.config-card-title { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 14px; color: var(--text-primary); margin-bottom: 16px; }
+.config-card-title svg { width: 17px; height: 17px; color: var(--blue-600); }
+.config-profile    { display: flex; align-items: center; gap: 16px; }
+</style>

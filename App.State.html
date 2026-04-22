@@ -1,0 +1,496 @@
+<script>
+// ============================================================
+// JCV FRONTEND — App.State.html  v5.0
+//
+// Estado global de la aplicación con patrón Observer liviano.
+//
+// Secciones:
+//   1. EventBus     — pub/sub desacoplado entre módulos
+//   2. Store        — estado reactivo central (unica fuente de verdad)
+//   3. Router       — navegación entre secciones sin history API
+//   4. SessionMgr   — sesión de usuario (token, refresh, expiración)
+//   5. CacheMgr     — caché en memoria para datos del backend
+//
+// Principios:
+//   • Store nunca muta directamente — solo via Store.set() / Store.patch()
+//   • Los módulos se subscriben a cambios via EventBus.on()
+//   • Router es el único que muestra/oculta secciones del DOM
+//   • CacheMgr evita re-fetches innecesarios (TTL configurable)
+// ============================================================
+
+// ── 1. EVENTBUS ──────────────────────────────────────────────
+// Pub/sub desacoplado. Los módulos se comunican via eventos,
+// nunca llamándose directamente entre sí.
+//
+// Eventos del sistema:
+//   'auth:login'    — usuario autenticado
+//   'auth:logout'   — sesión cerrada
+//   'nav:change'    — cambio de sección
+//   'data:refresh'  — datos actualizados en el Store
+//   'modal:open'    — apertura de modal
+//   'modal:close'   — cierre de modal
+//   'toast:show'    — notificación flash
+//   'theme:change'  — cambio dark/light
+const EventBus = (() => {
+  const _listeners = {};
+
+  function on(event, fn, opts) {
+    if (!_listeners[event]) _listeners[event] = [];
+    _listeners[event].push({ fn, once: !!(opts && opts.once) });
+    // Retorna función de cleanup (para useEffect-style)
+    return () => off(event, fn);
+  }
+
+  function once(event, fn) {
+    return on(event, fn, { once: true });
+  }
+
+  function off(event, fn) {
+    if (!_listeners[event]) return;
+    _listeners[event] = _listeners[event].filter(l => l.fn !== fn);
+  }
+
+  function emit(event, payload) {
+    const list = _listeners[event] || [];
+    const toKeep = [];
+    list.forEach(l => {
+      try { l.fn(payload); } catch (e) {
+        console.error(`[EventBus] Error en handler de "${event}":`, e);
+      }
+      if (!l.once) toKeep.push(l);
+    });
+    _listeners[event] = toKeep;
+  }
+
+  function clear(event) {
+    if (event) delete _listeners[event];
+    else Object.keys(_listeners).forEach(k => delete _listeners[k]);
+  }
+
+  return { on, once, off, emit, clear };
+})();
+
+// ── 2. STORE ─────────────────────────────────────────────────
+// Estado centralizado. Un solo objeto que representa
+// toda la realidad visible de la app en un momento dado.
+//
+// Regla: NUNCA mutar APP directamente. Usar Store.set() o Store.patch().
+const Store = (() => {
+
+  // Estado inicial
+  let _state = {
+    // Sesión
+    user:    null,   // { id, name, email, role, churchId, assignedGrade, ... }
+    token:   null,
+    ready:   false,  // true cuando la app terminó de inicializar
+
+    // Navegación
+    section: null,   // sección activa: 'people', 'cells', 'schools', ...
+    params:  {},     // parámetros de la sección (ej: { grade: 'escuelaVida' })
+
+    // UI
+    sidebarCollapsed: false,
+    darkMode:         false,
+    loading:          false,  // loading global (topbar spinner)
+
+    // Datos del backend (se llenan por módulo)
+    people:       [],
+    cells:        [],
+    churches:     [],
+    users:        [],
+    ministries:   [],
+    periods:      [],
+    enrollments:  {},   // { [grade]: [] }
+    classes:      [],
+    attendance:   [],
+    questionnaires:[],
+    scores:       {},   // { [enrollmentId]: scoreRow }
+    auditLog:     [],
+    dashboardStats: null,
+    schoolData:   null,
+
+    // Metadatos de paginación por sección
+    pagination: {
+      people:  { page: 1, pages: 1, total: 0 },
+      users:   { page: 1, pages: 1, total: 0 },
+      audit:   { page: 1, pages: 1, total: 0 },
+    },
+
+    // Búsqueda activa por sección
+    search: {
+      people:    '',
+      cells:     '',
+      churches:  '',
+      users:     '',
+      ministries:'',
+      audit:     '',
+      classes:   '',
+    },
+  };
+
+  // Subscriptores: Map<key, Set<fn>>
+  const _subs = new Map();
+
+  /**
+   * Lee el estado actual (o una sub-clave).
+   * Store.get()         → estado completo
+   * Store.get('user')   → _state.user
+   */
+  function get(key) {
+    return key ? _state[key] : { ..._state };
+  }
+
+  /**
+   * Reemplaza una clave del estado y notifica a los subscriptores.
+   * Store.set('people', [...]) → reemplaza state.people
+   */
+  function set(key, value) {
+    const prev = _state[key];
+    _state[key] = value;
+    _notify(key, value, prev);
+  }
+
+  /**
+   * Merge parcial en una clave de objeto.
+   * Store.patch('pagination', { people: { page: 2 } })
+   * → fusiona en lugar de reemplazar
+   */
+  function patch(key, partial) {
+    const prev = _state[key];
+    if (typeof prev === 'object' && prev !== null && !Array.isArray(prev)) {
+      _state[key] = { ...prev, ...partial };
+    } else {
+      _state[key] = partial;
+    }
+    _notify(key, _state[key], prev);
+  }
+
+  /**
+   * Subscripción a cambios de una clave específica.
+   * Retorna función de cleanup.
+   *
+   * Store.watch('people', (newVal, oldVal) => render())
+   */
+  function watch(key, fn) {
+    if (!_subs.has(key)) _subs.set(key, new Set());
+    _subs.get(key).add(fn);
+    return () => {
+      const set = _subs.get(key);
+      if (set) set.delete(fn);
+    };
+  }
+
+  function _notify(key, newVal, oldVal) {
+    const fns = _subs.get(key);
+    if (fns) fns.forEach(fn => {
+      try { fn(newVal, oldVal); }
+      catch (e) { console.error(`[Store] Error en watcher de "${key}":`, e); }
+    });
+    // Emitir evento genérico para listeners externos
+    EventBus.emit('store:change', { key, value: newVal });
+  }
+
+  /**
+   * Resetea el estado a los valores iniciales.
+   * Se llama en logout.
+   */
+  function reset() {
+    const keep = {
+      darkMode:         _state.darkMode,
+      sidebarCollapsed: _state.sidebarCollapsed,
+    };
+    _state = {
+      user: null, token: null, ready: false,
+      section: null, params: {},
+      sidebarCollapsed: keep.sidebarCollapsed,
+      darkMode: keep.darkMode,
+      loading: false,
+      people: [], cells: [], churches: [], users: [],
+      ministries: [], periods: [], enrollments: {},
+      classes: [], attendance: [], questionnaires: [],
+      scores: {}, auditLog: [], dashboardStats: null, schoolData: null,
+      pagination: {
+        people:  { page: 1, pages: 1, total: 0 },
+        users:   { page: 1, pages: 1, total: 0 },
+        audit:   { page: 1, pages: 1, total: 0 },
+      },
+      search: {
+        people: '', cells: '', churches: '',
+        users: '', ministries: '', audit: '', classes: '',
+      },
+    };
+    // Notificar a todos los watchers
+    _subs.forEach((fns, key) => {
+      fns.forEach(fn => { try { fn(_state[key], null); } catch (_) {} });
+    });
+  }
+
+  return { get, set, patch, watch, reset };
+})();
+
+// ── 3. ROUTER ────────────────────────────────────────────────
+// Navegación entre secciones de la SPA sin history API.
+// Las secciones son <div id="sect-X"> en el DOM.
+//
+// Secciones válidas: people, cells, churches, ministries,
+//   schools, users, audit, config, dashboard
+const Router = (() => {
+  const SECTIONS = [
+    'dashboard', 'people', 'cells', 'churches',
+    'ministries', 'schools', 'users', 'audit', 'config',
+  ];
+
+  // Permisos por sección — qué roles pueden acceder
+  const PERMISSIONS = {
+    dashboard:  ['admin', 'secretary', 'maestro'],
+    people:     ['admin', 'secretary'],
+    cells:      ['admin', 'secretary'],
+    churches:   ['admin'],
+    ministries: ['admin', 'secretary'],
+    schools:    ['admin', 'secretary', 'maestro'],
+    users:      ['admin'],
+    audit:      ['admin'],
+    config:     ['admin', 'secretary', 'maestro'],
+  };
+
+  // Sección por defecto según rol
+  const DEFAULT_SECTION = {
+    admin:     'dashboard',
+    secretary: 'dashboard',
+    maestro:   'schools',
+  };
+
+  let _current  = null;
+  let _params   = {};
+  let _handlers = {};  // { [section]: renderFn }
+
+  /**
+   * Registra la función de render de una sección.
+   * Llamado por cada módulo al inicializarse:
+   *   Router.register('people', PeopleModule.render)
+   */
+  function register(section, fn) {
+    _handlers[section] = fn;
+  }
+
+  /**
+   * Navega a una sección.
+   * @param {string} section - nombre de la sección
+   * @param {Object} params  - parámetros opcionales
+   */
+  function go(section, params) {
+    if (!SECTIONS.includes(section)) {
+      console.warn(`[Router] Sección desconocida: "${section}"`);
+      return;
+    }
+
+    // Verificar permiso
+    const user = Store.get('user');
+    if (user && !_canAccess(section, user.role)) {
+      console.warn(`[Router] Acceso denegado a "${section}" para rol "${user.role}"`);
+      return;
+    }
+
+    _params  = params || {};
+    _current = section;
+
+    // Actualizar DOM — ocultar todas, mostrar la activa
+    SECTIONS.forEach(s => {
+      const el = document.getElementById('sect-' + s);
+      if (el) el.style.display = s === section ? '' : 'none';
+    });
+
+    // Actualizar Store
+    Store.set('section', section);
+    Store.set('params', _params);
+
+    // Llamar al handler de render del módulo.
+    // render() es async — capturar rechazos para evitar spinners infinitos.
+    if (_handlers[section]) {
+      try {
+        const result = _handlers[section](_params);
+        if (result && typeof result.catch === 'function') {
+          result.catch(e => {
+            console.error(`[Router] Error async renderizando "${section}":`, e);
+            const el = document.getElementById('sect-' + section);
+            if (el && el.querySelector('.spinner')) {
+              el.innerHTML = `<div style="padding:48px 24px;text-align:center">
+                <div style="font-size:13px;color:var(--red-600)">${e.message || 'Error al cargar'}</div>
+                <button onclick="Router.go('${section}')" style="margin-top:12px;padding:7px 14px;border-radius:8px;border:1px solid var(--border-medium);background:var(--bg-subtle);cursor:pointer;font-size:13px">Reintentar</button>
+              </div>`;
+            }
+          });
+        }
+      } catch (e) {
+        console.error(`[Router] Error renderizando "${section}":`, e);
+      }
+    }
+
+    // Emitir evento de navegación
+    EventBus.emit('nav:change', { section, params: _params });
+
+    // Actualizar sidebar activo
+    _updateSidebarActive(section);
+  }
+
+  /**
+   * Sección inicial tras login según el rol del usuario.
+   */
+  function goDefault(user) {
+    const section = DEFAULT_SECTION[user.role] || 'dashboard';
+    // Para maestro: ir directo a su grado asignado
+    const params = (user.role === 'maestro' && user.assignedGrade)
+      ? { grade: user.assignedGrade }
+      : {};
+    go(section, params);
+  }
+
+  function current()   { return _current; }
+  function getParams() { return _params; }
+
+  function _canAccess(section, role) {
+    const allowed = PERMISSIONS[section];
+    return !allowed || allowed.includes(role);
+  }
+
+  function _updateSidebarActive(section) {
+    document.querySelectorAll('.sb-ni').forEach(el => {
+      el.classList.toggle('active', el.dataset.section === section);
+    });
+  }
+
+  return { register, go, goDefault, current, getParams };
+})();
+
+// ── 4. SESSIONMGR ────────────────────────────────────────────
+// Gestión del ciclo de vida de la sesión del usuario.
+// Persiste token en sessionStorage o localStorage según "Mantener sesión".
+const SessionMgr = (() => {
+  const KEY_TOKEN   = 'jcv_token';
+  const KEY_PERSIST = 'jcv_persist';
+  let _refreshInterval = null;
+
+  /** Guarda la sesión tras login exitoso */
+  function save(token, user, persist) {
+    const storage = persist ? localStorage : sessionStorage;
+    storage.setItem(KEY_TOKEN, token);
+    if (persist) localStorage.setItem(KEY_PERSIST, '1');
+    Store.set('token', token);
+    Store.set('user',  user);
+  }
+
+  /** Lee el token guardado (sessionStorage primero, luego localStorage) */
+  function load() {
+    return sessionStorage.getItem(KEY_TOKEN)
+      || localStorage.getItem(KEY_TOKEN)
+      || null;
+  }
+
+  /** Borra todos los datos de sesión */
+  function clear() {
+    sessionStorage.removeItem(KEY_TOKEN);
+    localStorage.removeItem(KEY_TOKEN);
+    localStorage.removeItem(KEY_PERSIST);
+    stopRefresh();
+    Store.reset();
+  }
+
+  /** Inicia el refresh automático de sesión (sliding window) */
+  function startRefresh() {
+    stopRefresh();
+    _refreshInterval = setInterval(() => {
+      const token = load();
+      if (!token) { clear(); return; }
+      // getCurrentUser extiende el TTL en el backend
+      API.getCurrentUser(token)
+        .then(res => {
+          if (!res || !res.success) {
+            clear();
+            EventBus.emit('auth:logout', { reason: 'expired' });
+          } else {
+            Store.set('user', res.user);
+          }
+        })
+        .catch(() => {}); // Silencioso — no desloguear por error de red
+    }, CONFIG.SESSION_REFRESH_MS);
+  }
+
+  function stopRefresh() {
+    if (_refreshInterval) {
+      clearInterval(_refreshInterval);
+      _refreshInterval = null;
+    }
+  }
+
+  return { save, load, clear, startRefresh, stopRefresh };
+})();
+
+// ── 5. CACHEMGR ──────────────────────────────────────────────
+// Caché en memoria para datos del backend.
+// Evita re-fetches cuando el usuario navega entre secciones
+// sin que los datos hayan cambiado.
+//
+// TTL por tipo de dato (en ms):
+//   Estable (células, nexos):    10 min
+//   Normal (personas, usuarios):  3 min
+//   Volátil (auditLog):           1 min
+const CacheMgr = (() => {
+  const _cache = new Map();
+
+  const TTL = {
+    cells:       10 * 60 * 1000,
+    churches:    10 * 60 * 1000,
+    periods:     10 * 60 * 1000,
+    ministries:   5 * 60 * 1000,
+    people:       3 * 60 * 1000,
+    users:        3 * 60 * 1000,
+    classes:      3 * 60 * 1000,
+    schoolData:   2 * 60 * 1000,
+    enrollments:  2 * 60 * 1000,
+    dashboardStats: 2 * 60 * 1000,
+    auditLog:     1 * 60 * 1000,
+  };
+
+  const DEFAULT_TTL = 2 * 60 * 1000;
+
+  /** Guarda un valor en caché con TTL */
+  function set(key, value) {
+    const ttl = TTL[key] || DEFAULT_TTL;
+    _cache.set(key, { value, expires: Date.now() + ttl });
+  }
+
+  /** Lee del caché. Retorna null si expiró o no existe */
+  function get(key) {
+    const entry = _cache.get(key);
+    if (!entry) return null;
+    if (Date.now() > entry.expires) {
+      _cache.delete(key);
+      return null;
+    }
+    return entry.value;
+  }
+
+  /** Invalida una o todas las entradas */
+  function evict(key) {
+    if (key) _cache.delete(key);
+    else _cache.clear();
+  }
+
+  /** Verifica si la clave tiene datos frescos */
+  function has(key) {
+    return get(key) !== null;
+  }
+
+  return { set, get, evict, has };
+})();
+
+// ── ALIAS GLOBAL ─────────────────────────────────────────────
+// APP es el punto de entrada para los módulos.
+// Solo acceso de lectura — no mutar directamente.
+const APP = {
+  get user()    { return Store.get('user');    },
+  get token()   { return Store.get('token');   },
+  get section() { return Store.get('section'); },
+  get params()  { return Store.get('params');  },
+};
+</script>

@@ -1,0 +1,750 @@
+<script>
+// ============================================================
+// JCV FRONTEND — App.Bridge.html  v5.0
+//
+// Capa de comunicación entre el frontend y Google Apps Script.
+//
+// Secciones:
+//   1. GASBridge  — wrapper Promise sobre google.script.run
+//   2. API        — funciones nombradas por dominio (alineadas
+//                   con Controller.gs del backend v5)
+//   3. Toast      — notificaciones flash (aquí para uso en API)
+//
+// Principios de diseño:
+//   • Una sola forma de llamar al backend: API.nombreFuncion()
+//   • Todas las funciones retornan Promise<data> (nunca {ok,data})
+//   • Los errores del backend se convierten en rechazos de Promise
+//   • El token de sesión se inyecta automáticamente cuando aplica
+//   • CacheMgr se consulta antes de cada fetch cuando corresponde
+//
+// Retrocompatibilidad 100% con Controller.gs:
+//   Los nombres de funciones son exactamente los del Controller.gs
+//   (getPeople, savePerson, getCells, etc.)
+// ============================================================
+
+// ── 1. GAS BRIDGE ────────────────────────────────────────────
+// Wrapper Promise sobre google.script.run.
+// Maneja el protocolo { ok: boolean, data, error } del backend.
+const GASBridge = (() => {
+
+  /**
+   * Llama a una función pública del Controller.gs.
+   *
+   * @param {string} fnName  - nombre de la función (ej: 'getPeople')
+   * @param {...any} args    - argumentos posicionales
+   * @returns {Promise<any>} - resuelve con data, rechaza con error
+   */
+  function call(fnName, ...args) {
+    return new Promise((resolve, reject) => {
+      const runner = google.script.run
+        .withSuccessHandler(res => {
+          // Controller retorna { ok, data } o { ok, error }
+          // Auth retorna { success, ... } directamente
+          if (res && typeof res === 'object') {
+            if ('ok' in res) {
+              if (res.ok) resolve(res.data);
+              else reject(new Error(res.error || 'Error del servidor'));
+            } else if ('success' in res) {
+              resolve(res);
+            } else {
+              resolve(res);
+            }
+          } else {
+            resolve(res);
+          }
+        })
+        .withFailureHandler(err => {
+          const msg = (err && err.message) || 'Error de conexión con el servidor';
+          reject(new Error(msg));
+        });
+
+      // IMPORTANTE: google.script.run es un Proxy dinámico de GAS.
+      // runner[fnName] evaluado como propiedad siempre devuelve undefined.
+      // La única forma correcta de llamar es runner[fnName](...args) directamente,
+      // capturando el TypeError si la función no existe en el backend.
+      try {
+        runner[fnName](...args);
+      } catch (e) {
+        reject(new Error(`Función "${fnName}" no encontrada en el backend: ${e.message}`));
+      }
+    });
+  }
+
+  /**
+   * Inyecta _userId en el primer argumento objeto.
+   * Si el primer argumento es un objeto, agrega _userId.
+   * Si no, el userId va como argumento separado.
+   */
+  function callWithUser(fnName, dataOrFirstArg, ...rest) {
+    const userId = APP.user ? APP.user.id : '';
+    if (dataOrFirstArg && typeof dataOrFirstArg === 'object' && !Array.isArray(dataOrFirstArg)) {
+      return call(fnName, { ...dataOrFirstArg, _userId: userId }, ...rest);
+    }
+    return call(fnName, dataOrFirstArg, ...rest, userId);
+  }
+
+  return { call, callWithUser };
+})();
+
+// ── 2. API ───────────────────────────────────────────────────
+// Funciones nombradas alineadas con Controller.gs.
+// Cada función retorna Promise<data>.
+//
+// Patrón para operaciones de lectura con caché:
+//   1. Consultar CacheMgr
+//   2. Si hay datos frescos, retornar sin ir al backend
+//   3. Si no, fetchear, guardar en CacheMgr y Store, retornar
+//
+// Patrón para mutaciones:
+//   1. Llamar al backend
+//   2. Evict del caché de la entidad afectada
+//   3. Retornar resultado
+
+const API = (() => {
+
+  // ── AUTH ─────────────────────────────────────────────────
+
+  function login(identifier, password) {
+    return GASBridge.call('login', identifier, password);
+  }
+
+  function logout(token) {
+    return GASBridge.call('logout', token || APP.token);
+  }
+
+  function getCurrentUser(token) {
+    return GASBridge.call('getCurrentUser', token || APP.token);
+  }
+
+  function sendPasswordRecovery(email) {
+    return GASBridge.call('sendPasswordRecovery', email);
+  }
+
+  function validateRecoveryToken(code) {
+    return GASBridge.call('validateRecoveryToken', code);
+  }
+
+  function resetPassword(code, newPassword) {
+    return GASBridge.call('resetPassword', code, newPassword);
+  }
+
+  // ── PERSONAS ─────────────────────────────────────────────
+
+  function getPeople(force) {
+    if (!force && CacheMgr.has('people')) {
+      return Promise.resolve(CacheMgr.get('people'));
+    }
+    return GASBridge.call('getPeople').then(data => {
+      const people = Array.isArray(data) ? data : [];
+      CacheMgr.set('people', people);
+      Store.set('people', people);
+      return people;
+    });
+  }
+
+  function getPeopleByIds(ids) {
+    return GASBridge.call('getPeopleByIds', ids);
+  }
+
+  function savePerson(data) {
+    return GASBridge.callWithUser('savePerson', data).then(res => {
+      CacheMgr.evict('people');
+      CacheMgr.evict('schoolData');
+      return res;
+    });
+  }
+
+  function deletePerson(id) {
+    return GASBridge.call('deletePerson', id).then(res => {
+      CacheMgr.evict('people');
+      return res;
+    });
+  }
+
+  // ── CÉLULAS ──────────────────────────────────────────────
+
+  function getCells(force) {
+    if (!force && CacheMgr.has('cells')) {
+      return Promise.resolve(CacheMgr.get('cells'));
+    }
+    return GASBridge.call('getCells').then(data => {
+      const cells = Array.isArray(data) ? data : [];
+      CacheMgr.set('cells', cells);
+      Store.set('cells', cells);
+      return cells;
+    });
+  }
+
+  function saveCell(data) {
+    return GASBridge.callWithUser('saveCell', data).then(res => {
+      CacheMgr.evict('cells');
+      return res;
+    });
+  }
+
+  function deleteCell(id) {
+    return GASBridge.call('deleteCell', id).then(res => {
+      CacheMgr.evict('cells');
+      return res;
+    });
+  }
+
+  // ── NEXOS ────────────────────────────────────────────────
+
+  function getChurches(force) {
+    if (!force && CacheMgr.has('churches')) {
+      return Promise.resolve(CacheMgr.get('churches'));
+    }
+    return GASBridge.call('getChurches').then(data => {
+      const churches = Array.isArray(data) ? data : [];
+      CacheMgr.set('churches', churches);
+      Store.set('churches', churches);
+      return churches;
+    });
+  }
+
+  function saveChurch(data) {
+    return GASBridge.callWithUser('saveChurch', data).then(res => {
+      CacheMgr.evict('churches');
+      return res;
+    });
+  }
+
+  function deleteChurch(id) {
+    return GASBridge.call('deleteChurch', id).then(res => {
+      CacheMgr.evict('churches');
+      return res;
+    });
+  }
+
+  // ── USUARIOS ─────────────────────────────────────────────
+
+  function getUsers(force) {
+    if (!force && CacheMgr.has('users')) {
+      return Promise.resolve(CacheMgr.get('users'));
+    }
+    return GASBridge.call('getUsers').then(data => {
+      const users = Array.isArray(data) ? data : [];
+      CacheMgr.set('users', users);
+      Store.set('users', users);
+      return users;
+    });
+  }
+
+  function saveUser(data) {
+    return GASBridge.callWithUser('saveUser', data).then(res => {
+      CacheMgr.evict('users');
+      return res;
+    });
+  }
+
+  function deleteUser(id) {
+    return GASBridge.call('deleteUser', id).then(res => {
+      CacheMgr.evict('users');
+      return res;
+    });
+  }
+
+  function changePassword(userId, currentPassword, newPassword) {
+    return GASBridge.call('changePassword', userId, currentPassword, newPassword);
+  }
+
+  // ── MINISTERIOS ──────────────────────────────────────────
+
+  function getMinistries(force) {
+    if (!force && CacheMgr.has('ministries')) {
+      return Promise.resolve(CacheMgr.get('ministries'));
+    }
+    return GASBridge.call('getMinistries').then(data => {
+      const ministries = Array.isArray(data) ? data : [];
+      CacheMgr.set('ministries', ministries);
+      Store.set('ministries', ministries);
+      return ministries;
+    });
+  }
+
+  function saveMinistry(data) {
+    return GASBridge.callWithUser('saveMinistry', data).then(res => {
+      CacheMgr.evict('ministries');
+      return res;
+    });
+  }
+
+  function deleteMinistry(id) {
+    return GASBridge.call('deleteMinistry', id).then(res => {
+      CacheMgr.evict('ministries');
+      return res;
+    });
+  }
+
+  function addMinistryMember(ministryId, personId) {
+    return GASBridge.call('addMinistryMember', ministryId, personId).then(res => {
+      CacheMgr.evict('ministries');
+      CacheMgr.evict('people');
+      return res;
+    });
+  }
+
+  function removeMinistryMember(ministryId, personId) {
+    return GASBridge.call('removeMinistryMember', ministryId, personId).then(res => {
+      CacheMgr.evict('ministries');
+      CacheMgr.evict('people');
+      return res;
+    });
+  }
+
+  // ── INSCRIPCIONES ────────────────────────────────────────
+
+  function getEnrollments(force) {
+    if (!force && CacheMgr.has('enrollments')) {
+      return Promise.resolve(CacheMgr.get('enrollments'));
+    }
+    return GASBridge.call('getEnrollments').then(data => {
+      const enrollments = data || {};
+      CacheMgr.set('enrollments', enrollments);
+      Store.set('enrollments', enrollments);
+      return enrollments;
+    });
+  }
+
+  function getEnrollmentsByGrade(grade, force) {
+    const key = 'enrollments_' + grade;
+    if (!force && CacheMgr.has(key)) {
+      return Promise.resolve(CacheMgr.get(key));
+    }
+    return GASBridge.call('getEnrollmentsByGrade', grade).then(data => {
+      CacheMgr.set(key, data || {});
+      return data || {};
+    });
+  }
+
+  function getSchoolData(grade, force) {
+    const key = 'schoolData_' + (grade || 'all');
+    if (!force && CacheMgr.has(key)) {
+      return Promise.resolve(CacheMgr.get(key));
+    }
+    return GASBridge.call('getSchoolData', grade).then(data => {
+      CacheMgr.set(key, data);
+      Store.set('schoolData', data);
+      return data;
+    });
+  }
+
+  function enrollPerson(personId, grade) {
+    return GASBridge.call('enrollPerson', personId, grade, APP.user ? APP.user.id : '').then(res => {
+      _evictSchoolCaches();
+      return res;
+    });
+  }
+
+  function unenrollPerson(enrollmentId, motivo, detail) {
+    return GASBridge.call('unenrollPerson', enrollmentId, motivo, detail, APP.user ? APP.user.id : '').then(res => {
+      _evictSchoolCaches();
+      return res;
+    });
+  }
+
+  function setEnrollmentStatus(enrollmentId, status, periodId) {
+    return GASBridge.call('setEnrollmentStatus', enrollmentId, status, periodId, APP.user ? APP.user.id : '').then(res => {
+      _evictSchoolCaches();
+      return res;
+    });
+  }
+
+  // ── PERÍODOS ─────────────────────────────────────────────
+
+  function getPeriods(force) {
+    if (!force && CacheMgr.has('periods')) {
+      return Promise.resolve(CacheMgr.get('periods'));
+    }
+    return GASBridge.call('getPeriods').then(data => {
+      const periods = Array.isArray(data) ? data : [];
+      CacheMgr.set('periods', periods);
+      Store.set('periods', periods);
+      return periods;
+    });
+  }
+
+  function getCurrentSemester() {
+    return GASBridge.call('getCurrentSemester');
+  }
+
+  function savePeriod(data) {
+    return GASBridge.call('savePeriod', data, APP.user ? APP.user.id : '').then(res => {
+      CacheMgr.evict('periods');
+      _evictSchoolCaches();
+      return res;
+    });
+  }
+
+  // ── CALIFICACIONES ───────────────────────────────────────
+
+  function saveScores(enrollmentId, scoresData) {
+    return GASBridge.call('saveScores', enrollmentId, scoresData, APP.user ? APP.user.id : '').then(res => {
+      _evictSchoolCaches();
+      return res;
+    });
+  }
+
+  // ── CLASES ───────────────────────────────────────────────
+
+  function getClasses(grade, force) {
+    const key = 'classes_' + (grade || 'all');
+    if (!force && CacheMgr.has(key)) {
+      return Promise.resolve(CacheMgr.get(key));
+    }
+    return GASBridge.call('getClasses', grade).then(data => {
+      const classes = Array.isArray(data) ? data : [];
+      CacheMgr.set(key, classes);
+      Store.set('classes', classes);
+      return classes;
+    });
+  }
+
+  function saveClass(data) {
+    return GASBridge.callWithUser('saveClass', data).then(res => {
+      CacheMgr.evict('classes_all');
+      if (data.grade) CacheMgr.evict('classes_' + data.grade);
+      _evictSchoolCaches();
+      return res;
+    });
+  }
+
+  function deleteClass(id) {
+    return GASBridge.call('deleteClass', id).then(res => {
+      CacheMgr.evict('classes_all');
+      _evictSchoolCaches();
+      return res;
+    });
+  }
+
+  // ── ASISTENCIA ───────────────────────────────────────────
+
+  function getAttendance(classId) {
+    return GASBridge.call('getAttendance', classId);
+  }
+
+  function saveAttendance(data) {
+    return GASBridge.callWithUser('saveAttendance', data).then(res => {
+      _evictSchoolCaches();
+      return res;
+    });
+  }
+
+  function saveAttendanceBatch(classId, records) {
+    return GASBridge.call('saveAttendanceBatch', classId, records, APP.user ? APP.user.id : '').then(res => {
+      _evictSchoolCaches();
+      return res;
+    });
+  }
+
+  // ── CUESTIONARIOS ────────────────────────────────────────
+
+  function getQuestionnaires(classId) {
+    return GASBridge.call('getQuestionnaires', classId);
+  }
+
+  function saveQuestionnaire(data) {
+    return GASBridge.callWithUser('saveQuestionnaire', data).then(res => {
+      _evictSchoolCaches();
+      return res;
+    });
+  }
+
+  function submitQuestionnaire(id, nota) {
+    return GASBridge.call('submitQuestionnaire', id, nota).then(res => {
+      _evictSchoolCaches();
+      return res;
+    });
+  }
+
+  function deleteQuestionnaire(id) {
+    return GASBridge.call('deleteQuestionnaire', id).then(res => {
+      _evictSchoolCaches();
+      return res;
+    });
+  }
+
+  // ── DASHBOARD ────────────────────────────────────────────
+
+  function getDashboardStats(force) {
+    if (!force && CacheMgr.has('dashboardStats')) {
+      return Promise.resolve(CacheMgr.get('dashboardStats'));
+    }
+    return GASBridge.call('getDashboardStats').then(data => {
+      CacheMgr.set('dashboardStats', data);
+      Store.set('dashboardStats', data);
+      return data;
+    });
+  }
+
+  function getSecretaryDashboard(grade) {
+    return GASBridge.call('getSecretaryDashboard', grade);
+  }
+
+  // ── AUDITORÍA ────────────────────────────────────────────
+
+  function getAuditLog(options) {
+    return GASBridge.call('getAuditLog', options || {});
+  }
+
+  // ── CONFIGURACIÓN ────────────────────────────────────────
+
+  function clearAllCache() {
+    return GASBridge.call('clearAllCache').then(res => {
+      CacheMgr.evict(); // limpiar también caché del frontend
+      return res;
+    });
+  }
+
+  function uploadPhoto(base64Data, mimeType, fileName) {
+    return GASBridge.call('uploadPhoto', base64Data, mimeType, fileName);
+  }
+
+  // ── HELPERS PRIVADOS ─────────────────────────────────────
+
+  /** Evicta todos los cachés relacionados con escuelas */
+  function _evictSchoolCaches() {
+    CONFIG.GRADE_KEYS.forEach(g => {
+      CacheMgr.evict('schoolData_' + g);
+      CacheMgr.evict('enrollments_' + g);
+    });
+    CacheMgr.evict('schoolData_all');
+    CacheMgr.evict('enrollments');
+    CacheMgr.evict('dashboardStats');
+  }
+
+  return {
+    // Auth
+    login, logout, getCurrentUser,
+    sendPasswordRecovery, validateRecoveryToken, resetPassword,
+
+    // CRUD entidades
+    getPeople, getPeopleByIds, savePerson, deletePerson,
+    getCells, saveCell, deleteCell,
+    getChurches, saveChurch, deleteChurch,
+    getUsers, saveUser, deleteUser, changePassword,
+    getMinistries, saveMinistry, deleteMinistry,
+    addMinistryMember, removeMinistryMember,
+
+    // Escuelas
+    getEnrollments, getEnrollmentsByGrade, getSchoolData,
+    enrollPerson, unenrollPerson, setEnrollmentStatus,
+    getPeriods, getCurrentSemester, savePeriod,
+    saveScores,
+    getClasses, saveClass, deleteClass,
+    getAttendance, saveAttendance, saveAttendanceBatch,
+    getQuestionnaires, saveQuestionnaire,
+    submitQuestionnaire, deleteQuestionnaire,
+
+    // Dashboard y audit
+    getDashboardStats, getSecretaryDashboard,
+    getAuditLog,
+
+    // Utilidades
+    clearAllCache, uploadPhoto,
+  };
+})();
+
+// ── 3. TOAST ─────────────────────────────────────────────────
+// Notificaciones flash. Se muestra en la esquina inferior derecha.
+// Auto-desaparece tras 3.5s. Stackable (hasta 3 visibles a la vez).
+const Toast = (() => {
+  let _container = null;
+
+  function _getContainer() {
+    if (!_container) {
+      _container = document.getElementById('toast-container');
+      if (!_container) {
+        _container = document.createElement('div');
+        _container.id = 'toast-container';
+        document.body.appendChild(_container);
+      }
+    }
+    return _container;
+  }
+
+  /**
+   * Muestra una notificación flash.
+   * @param {string} message - texto a mostrar
+   * @param {'success'|'error'|'info'|'warning'} type
+   * @param {number} duration - ms (default 3500)
+   */
+  function show(message, type, duration) {
+    type     = type     || 'info';
+    duration = duration || 3500;
+
+    const toastIcons = {
+      success: IC.check,
+      error:   IC.alert,
+      warning: IC.warning,
+      info:    IC.info,
+    };
+
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${type}`;
+    toast.innerHTML = `
+      <span class="toast-icon">${toastIcons[type] || IC.info}</span>
+      <span class="toast-msg">${H.escape(message)}</span>
+      <button class="toast-close" onclick="this.parentElement.remove()">${IC.close}</button>
+    `;
+
+    _getContainer().appendChild(toast);
+
+    // Animar entrada
+    requestAnimationFrame(() => toast.classList.add('toast-show'));
+
+    // Auto-remover
+    const timer = setTimeout(() => {
+      toast.classList.remove('toast-show');
+      toast.classList.add('toast-hide');
+      setTimeout(() => toast.remove(), 300);
+    }, duration);
+
+    // Click cierra inmediatamente
+    toast.querySelector('.toast-close').addEventListener('click', () => {
+      clearTimeout(timer);
+    });
+
+    EventBus.emit('toast:show', { message, type });
+  }
+
+  function success(msg, duration) { show(msg, 'success', duration); }
+  function error(msg, duration)   { show(msg, 'error',   duration); }
+  function info(msg, duration)    { show(msg, 'info',    duration); }
+  function warning(msg, duration) { show(msg, 'warning', duration); }
+
+  return { show, success, error, info, warning };
+})();
+
+// ── MODAL BASE ───────────────────────────────────────────────
+// Sistema de modales centralizado. Un solo modal activo a la vez.
+// Los módulos no crean sus propios overlays — usan este.
+const Modal = (() => {
+  let _overlay  = null;
+  let _onClose  = null;
+  let _stack    = [];  // soporte para modales anidados
+
+  function _getOverlay() {
+    if (!_overlay) {
+      _overlay = document.getElementById('modal-overlay');
+    }
+    return _overlay;
+  }
+
+  /**
+   * Abre el modal con el contenido dado.
+   * @param {Object} opts
+   * @param {string}   opts.title    - título del modal
+   * @param {string}   opts.body     - HTML del cuerpo
+   * @param {string}   [opts.footer] - HTML del footer (botones)
+   * @param {string}   [opts.size]   - 'sm' | 'md' | 'lg' | 'xl'
+   * @param {Function} [opts.onClose]- callback al cerrar
+   */
+  function open(opts) {
+    const overlay = _getOverlay();
+    if (!overlay) return;
+
+    _onClose = opts.onClose || null;
+    const size = opts.size || 'md';
+
+    overlay.innerHTML = `
+      <div class="modal modal-${size}" role="dialog" aria-modal="true">
+        <div class="modal-header">
+          <h3 class="modal-title">${H.escape(opts.title || '')}</h3>
+          <button class="modal-close-btn" onclick="Modal.close()" aria-label="Cerrar">
+            ${IC.close}
+          </button>
+        </div>
+        <div class="modal-body" id="modal-body">
+          ${opts.body || ''}
+        </div>
+        ${opts.footer ? `<div class="modal-footer">${opts.footer}</div>` : ''}
+      </div>
+    `;
+
+    overlay.classList.add('modal-open');
+    document.body.classList.add('modal-active');
+
+    // Cerrar con Escape
+    document.addEventListener('keydown', _escListener);
+
+    // Cerrar al click en overlay (fuera del modal)
+    overlay.addEventListener('click', _overlayClickListener);
+
+    EventBus.emit('modal:open', { title: opts.title });
+
+    // Focus trap: foco en primer input
+    setTimeout(() => {
+      const first = overlay.querySelector('input, select, textarea, button');
+      if (first) first.focus();
+    }, 100);
+  }
+
+  function close() {
+    const overlay = _getOverlay();
+    if (!overlay) return;
+    overlay.classList.remove('modal-open');
+    document.body.classList.remove('modal-active');
+    document.removeEventListener('keydown', _escListener);
+    overlay.removeEventListener('click', _overlayClickListener);
+    if (_onClose) { try { _onClose(); } catch (_) {} }
+    _onClose = null;
+    EventBus.emit('modal:close');
+  }
+
+  /** Actualiza solo el body del modal abierto (para loading states) */
+  function setBody(html) {
+    const body = document.getElementById('modal-body');
+    if (body) body.innerHTML = html;
+  }
+
+  /** Muestra spinner de loading dentro del modal */
+  function setLoading(text) {
+    setBody(`
+      <div class="modal-loading">
+        <div class="spinner"></div>
+        <p>${H.escape(text || 'Cargando...')}</p>
+      </div>
+    `);
+  }
+
+  /**
+   * Modal de confirmación simple.
+   * @returns {Promise<boolean>} - true si confirma, false si cancela
+   */
+  function confirm(opts) {
+    return new Promise(resolve => {
+      open({
+        title: opts.title || '¿Estás seguro?',
+        size:  'sm',
+        body:  `<p class="modal-confirm-text">${opts.message || ''}</p>`,
+        footer: `
+          <button class="btn btn-ghost" onclick="Modal.close()">Cancelar</button>
+          <button class="btn btn-danger" id="modal-confirm-btn">
+            ${opts.confirmText || 'Confirmar'}
+          </button>
+        `,
+        onClose: () => resolve(false),
+      });
+      setTimeout(() => {
+        const btn = document.getElementById('modal-confirm-btn');
+        if (btn) btn.addEventListener('click', () => {
+          close();
+          resolve(true);
+        });
+      }, 50);
+    });
+  }
+
+  function _escListener(e) {
+    if (e.key === 'Escape') close();
+  }
+
+  function _overlayClickListener(e) {
+    if (e.target === _getOverlay()) close();
+  }
+
+  return { open, close, setBody, setLoading, confirm };
+})();
+</script>
